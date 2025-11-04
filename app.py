@@ -19,7 +19,7 @@ def read_csv_safely(path_or_buffer, **kwargs):
     """
     Tenta ler um CSV com diferentes codificações e separadores
     """
-    encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'windows-1252']
     separators = [',', ';', '\t']
     
     for encoding in encodings:
@@ -45,56 +45,130 @@ def read_csv_safely(path_or_buffer, **kwargs):
         return df
     except Exception as e:
         st.error(f"Erro ao ler arquivo: {str(e)}")
-        # Tentativa como string literal para debug
-        if hasattr(path_or_buffer, 'seek'):
-            path_or_buffer.seek(0)
-        content = path_or_buffer.read().decode('latin-1')
-        st.text_area("Conteúdo do arquivo (primeiras 1000 caracteres):", content[:1000], height=200)
         return pd.DataFrame()
 
 def normalize_col(s):
     if pd.isna(s):
         return ""
-    return (
-        str(s).strip()
-         .lower()
-         .replace("ã","a").replace("â","a").replace("á","a").replace("à","a")
-         .replace("ê","e").replace("é","e").replace("è","e")
-         .replace("î","i").replace("í","i").replace("ì","i")
-         .replace("õ","o").replace("ô","o").replace("ó","o").replace("ò","o")
-         .replace("û","u").replace("ú","u").replace("ù","u")
-         .replace("ç","c")
-         .replace("  "," ").replace("  "," ")
-    )
+    s = str(s).strip()
+    # Primeiro, tentar normalizar caracteres especiais
+    replacements = {
+        'ã': 'a', 'â': 'a', 'á': 'a', 'à': 'a',
+        'ê': 'e', 'é': 'e', 'è': 'e',
+        'î': 'i', 'í': 'i', 'ì': 'i',
+        'õ': 'o', 'ô': 'o', 'ó': 'o', 'ò': 'o',
+        'û': 'u', 'ú': 'u', 'ù': 'u',
+        'ç': 'c', 'þ': 'c', 'Þ': 'c',  # Tratamento específico para o caractere problemático
+        '  ': ' ', '  ': ' '
+    }
+    
+    result = ""
+    for char in s.lower():
+        result += replacements.get(char, char)
+    
+    return result
 
 def find_col(df, candidates):
     if df.empty:
         return None
+    
+    # Primeiro: busca exata após normalização
     cols_norm = {normalize_col(c): c for c in df.columns}
     for cand in candidates:
         nc = normalize_col(cand)
         if nc in cols_norm:
             return cols_norm[nc]
-    for c in df.columns:
-        if any(token in normalize_col(c) for token in [normalize_col(x) for x in candidates]):
-            return c
+    
+    # Segundo: busca por substring
+    for col in df.columns:
+        col_norm = normalize_col(col)
+        for cand in candidates:
+            if normalize_col(cand) in col_norm:
+                return col
+    
+    # Terceiro: busca por tokens
+    for col in df.columns:
+        col_norm = normalize_col(col)
+        col_tokens = set(col_norm.split())
+        for cand in candidates:
+            cand_tokens = set(normalize_col(cand).split())
+            if cand_tokens.intersection(col_tokens):
+                return col
+    
     return None
 
 def coalesce_columns(df, name, candidate_lists, required=True):
     for candidates in candidate_lists:
         col = find_col(df, candidates)
         if col is not None:
+            st.success(f"Coluna '{name}' encontrada: '{col}'")
             return col
+    
     if required:
         st.error(f"Não encontrei a coluna para '{name}'. Colunas disponíveis: {list(df.columns)}")
+        st.info("Tentando identificar colunas automaticamente...")
+        
+        # Tentativa automática baseada no conteúdo
+        if name == "região":
+            # Procurar por colunas que contenham valores como "Nordeste", "Sudeste", etc.
+            region_keywords = ['nordeste', 'sudeste', 'norte', 'sul', 'centro', 'regiao', 'uf']
+            for col in df.columns:
+                col_norm = normalize_col(col)
+                if any(keyword in col_norm for keyword in region_keywords):
+                    st.success(f"Coluna '{name}' identificada automaticamente: '{col}'")
+                    return col
+        
+        elif name == "faixa etária":
+            # Procurar por colunas que contenham faixas etárias
+            age_keywords = ['idade', 'faixa', 'ano', 'anos', 'etaria', 'group']
+            for col in df.columns:
+                col_norm = normalize_col(col)
+                if any(keyword in col_norm for keyword in age_keywords):
+                    st.success(f"Coluna '{name}' identificada automaticamente: '{col}'")
+                    return col
+        
+        elif name == "óbitos":
+            # Procurar por colunas numéricas que possam ser óbitos
+            death_keywords = ['obito', 'morte', 'death', 'numero', 'total', 'quantidade']
+            for col in df.columns:
+                col_norm = normalize_col(col)
+                if any(keyword in col_norm for keyword in death_keywords):
+                    # Verificar se a coluna tem valores numéricos
+                    if pd.to_numeric(df[col], errors='coerce').notna().any():
+                        st.success(f"Coluna '{name}' identificada automaticamente: '{col}'")
+                        return col
+        
+        elif name == "população":
+            # Procurar por colunas numéricas que possam ser população
+            pop_keywords = ['populacao', 'population', 'habitante', 'residente']
+            for col in df.columns:
+                col_norm = normalize_col(col)
+                if any(keyword in col_norm for keyword in pop_keywords):
+                    # Verificar se a coluna tem valores numéricos
+                    if pd.to_numeric(df[col], errors='coerce').notna().any():
+                        st.success(f"Coluna '{name}' identificada automaticamente: '{col}'")
+                        return col
+        
+        elif name == "ano":
+            # Procurar por colunas que contenham anos
+            year_keywords = ['ano', 'year', 'periodo', 'data']
+            for col in df.columns:
+                col_norm = normalize_col(col)
+                if any(keyword in col_norm for keyword in year_keywords):
+                    # Verificar se a coluna tem valores que parecem anos
+                    sample_values = df[col].dropna().head(10).astype(str)
+                    if any(len(str(val)) == 4 and str(val).isdigit() for val in sample_values):
+                        st.success(f"Coluna '{name}' identificada automaticamente: '{col}'")
+                        return col
+        
         return None
     return None
 
 # WHO World Standard Population (2000-2025)
 WHO_STD = pd.DataFrame({
     "AgeGroup": [
-        "0-4","5-9","10-14","15-19","20-24","25-29","30-34","35-39",
-        "40-44","45-49","50-54","55-59","60-64","65-69","70-74","75-79","80+"
+        "0-4", "5-9", "10-14", "15-19", "20-24", "25-29", "30-34", "35-39",
+        "40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "75-79", "80+"
     ],
     "StdPop": [
         8800, 8700, 8600, 8500, 8000, 7500, 7000, 6500,
@@ -108,10 +182,44 @@ def harmonize_age_group(s):
     s = str(s).strip()
     s = s.replace(" anos", "").replace("anos", "")
     s = s.replace("anos ou mais", "+").replace("ou mais", "+")
-    s = s.replace(" a ", "-").replace("–","-").replace("—","-").replace("−","-")
+    s = s.replace(" a ", "-").replace("–", "-").replace("—", "-").replace("−", "-")
     s = s.replace(" ", "")
-    if s in ["80+", "80mais", "80oumais", "80 e mais"]:
-        return "80+"
+    
+    # Mapeamento específico para os grupos do seu arquivo
+    age_mapping = {
+        "menor1ano": "0-1",
+        "menor 1 ano": "0-1", 
+        "1a4anos": "1-4",
+        "1 a 4 anos": "1-4",
+        "5a9anos": "5-9", 
+        "5 a 9 anos": "5-9",
+        "10a14anos": "10-14",
+        "10 a 14 anos": "10-14",
+        "15a19anos": "15-19",
+        "15 a 19 anos": "15-19",
+        "20a29anos": "20-29", 
+        "20 a 29 anos": "20-29",
+        "30a39anos": "30-39",
+        "30 a 39 anos": "30-39",
+        "40a49anos": "40-49",
+        "40 a 49 anos": "40-49",
+        "50a59anos": "50-59",
+        "50 a 59 anos": "50-59",
+        "60a69anos": "60-69",
+        "60 a 69 anos": "60-69",
+        "70a79anos": "70-79",
+        "70 a 79 anos": "70-79",
+        "80anose mais": "80+",
+        "80 anos e mais": "80+",
+        "80mais": "80+",
+        "idadeignorada": "ignorado",
+        "idade ignorada": "ignorado"
+    }
+    
+    s_normalized = s.lower().replace(" ", "")
+    if s_normalized in age_mapping:
+        return age_mapping[s_normalized]
+    
     parts = s.split("-")
     if len(parts) == 2:
         try:
@@ -120,6 +228,7 @@ def harmonize_age_group(s):
             return f"{a}-{b}"
         except Exception:
             pass
+    
     return s
 
 def direct_standardization(deaths_by_age, pop_by_age, std_df):
@@ -148,112 +257,180 @@ if uploaded_obitos is None or uploaded_pop is None:
     st.warning("Envie ambos os arquivos: **Óbitos** e **População** para iniciar a análise.")
     st.stop()
 
-# Mostrar informações dos arquivos
-st.sidebar.subheader("Informações dos Arquivos")
-if uploaded_obitos:
-    st.sidebar.write(f"Óbitos: {uploaded_obitos.name} ({uploaded_obitos.size} bytes)")
-if uploaded_pop:
-    st.sidebar.write(f"População: {uploaded_pop.name} ({uploaded_pop.size} bytes)")
-
-# Carregar dados com tratamento de erro melhorado
+# Carregar dados
 with st.spinner("Carregando arquivo de óbitos..."):
     df_ob = read_csv_safely(uploaded_obitos)
 
 with st.spinner("Carregando arquivo de população..."):
     df_pop = read_csv_safely(uploaded_pop)
 
-# Verificar se os DataFrames não estão vazios
 if df_ob.empty or df_pop.empty:
     st.error("Erro ao carregar os arquivos. Verifique o formato dos arquivos CSV.")
     st.stop()
 
-# Mostrar preview dos dados
-st.sidebar.subheader("Preview dos Dados")
-if st.sidebar.checkbox("Mostrar preview dos dados carregados"):
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("Dados de Óbitos:")
-        st.dataframe(df_ob.head(3))
-    with col2:
-        st.write("Dados de População:")
-        st.dataframe(df_pop.head(3))
-
 # ------------------------------
-# Mapeamento de colunas
+# Mapeamento de colunas - CORRIGIDO
 # ------------------------------
 
 st.subheader("Mapeamento de Colunas")
 
+# Para o arquivo de óbitos com a estrutura que você mostrou
+st.info("Analisando a estrutura do arquivo de óbitos...")
+
+# Baseado nas colunas que você mostrou: ['RegiaÞo', 'ClassificaçaÞo', 'Ano', 'Menor 1 ano', ...]
+# Vamos mapear manualmente baseado no padrão observado
+
 cols_ob = {
-    "region": coalesce_columns(df_ob, "região", [["regiao","região","uf","region","estado","uf_regiao"]]),
-    "year": coalesce_columns(df_ob, "ano", [["ano","year","periodo","anodeobito","ano_obito"]]),
-    "sex": coalesce_columns(df_ob, "sexo", [["sexo","sex","genero","sexobiologico"]], required=False),
-    "age": coalesce_columns(df_ob, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup","faixaetaria","faixa_etaria"]]),
-    "deaths": coalesce_columns(df_ob, "óbitos", [["obitos","mortes","deaths","numeroobitos","n_obitos"]]),
+    "region": "RegiaÞo",  # Coluna de região
+    "year": "Ano",        # Coluna de ano
+    "age": None,          # Não há uma coluna única de faixa etária - as faixas estão nas colunas
+    "deaths": None,       # As mortes estão distribuídas por colunas de faixa etária
 }
 
 cols_pop = {
-    "region": coalesce_columns(df_pop, "região", [["regiao","região","uf","region","estado","uf_regiao"]]),
-    "year": coalesce_columns(df_pop, "ano", [["ano","year","periodo","anoreferencia"]]),
-    "age": coalesce_columns(df_pop, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup","faixaetaria","faixa_etaria"]]),
-    "population": coalesce_columns(df_pop, "população", [["populacao","population","habitantes","pop","populacaoresidente"]]),
+    "region": None,
+    "year": None, 
+    "age": None,
+    "population": None,
 }
 
-# Verificar se todas as colunas obrigatórias foram encontradas
-required_ob_columns = ["region", "year", "age", "deaths"]
-required_pop_columns = ["region", "year", "age", "population"]
+# Verificar se podemos usar o mapeamento manual
+if "RegiaÞo" in df_ob.columns and "Ano" in df_ob.columns:
+    st.success("✅ Estrutura do arquivo de óbitos identificada!")
+    
+    # Lista de colunas que são faixas etárias (excluindo colunas de metadados)
+    age_columns = [col for col in df_ob.columns if col not in ['RegiaÞo', 'ClassificaçaÞo', 'Ano', 'Total', 'Idade ignorada']]
+    
+    st.write(f"**Colunas de faixa etária identificadas:** {age_columns}")
+    
+    # Transformar o formato wide para long
+    df_ob_long = pd.melt(
+        df_ob, 
+        id_vars=['RegiaÞo', 'Ano'],
+        value_vars=age_columns,
+        var_name='AgeGroup',
+        value_name='Deaths'
+    )
+    
+    # Renomear colunas
+    df_ob_long = df_ob_long.rename(columns={
+        'RegiaÞo': 'Region',
+        'Ano': 'Year'
+    })
+    
+    # Processar faixas etárias
+    df_ob_long['AgeGroup'] = df_ob_long['AgeGroup'].map(harmonize_age_group)
+    df_ob_long['Deaths'] = pd.to_numeric(df_ob_long['Deaths'], errors='coerce').fillna(0)
+    df_ob_long['Year'] = pd.to_numeric(df_ob_long['Year'], errors='coerce').dropna().astype(int)
+    
+    df_ob = df_ob_long
+    st.success("✅ Dados de óbitos transformados para formato longo!")
+    
+else:
+    # Se o mapeamento automático falhar, tentar o método original
+    cols_ob = {
+        "region": coalesce_columns(df_ob, "região", [["regiao","região","uf","region","estado","uf_regiao"]]),
+        "year": coalesce_columns(df_ob, "ano", [["ano","year","periodo","anodeobito","ano_obito"]]),
+        "age": coalesce_columns(df_ob, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup","faixaetaria","faixa_etaria"]]),
+        "deaths": coalesce_columns(df_ob, "óbitos", [["obitos","mortes","deaths","numeroobitos","n_obitos"]]),
+    }
+    
+    # Renomear colunas se encontradas
+    if all(cols_ob.values()):
+        df_ob = df_ob.rename(columns={
+            cols_ob["region"]: "Region", 
+            cols_ob["year"]: "Year", 
+            cols_ob["age"]: "AgeGroup", 
+            cols_ob["deaths"]: "Deaths"
+        })
 
-missing_columns = []
-for col in required_ob_columns:
-    if cols_ob[col] is None:
-        missing_columns.append(f"Óbitos: {col}")
+# Processar arquivo de população da mesma forma
+st.info("Analisando a estrutura do arquivo de população...")
 
-for col in required_pop_columns:
-    if cols_pop[col] is None:
-        missing_columns.append(f"População: {col}")
-
-if missing_columns:
-    st.error("Colunas obrigatórias não encontradas:")
-    for missing in missing_columns:
-        st.write(f"- {missing}")
-    st.write("Colunas disponíveis no arquivo de Óbitos:", list(df_ob.columns))
-    st.write("Colunas disponíveis no arquivo de População:", list(df_pop.columns))
-    st.stop()
-
-# Renomear colunas
-df_ob = df_ob.rename(columns={
-    cols_ob["region"]: "Region", 
-    cols_ob["year"]: "Year", 
-    cols_ob["age"]: "AgeGroup", 
-    cols_ob["deaths"]: "Deaths"
-})
-
-df_pop = df_pop.rename(columns={
-    cols_pop["region"]: "Region", 
-    cols_pop["year"]: "Year", 
-    cols_pop["age"]: "AgeGroup", 
-    cols_pop["population"]: "Population"
-})
+if "RegiaÞo" in df_pop.columns and "Ano" in df_pop.columns:
+    st.success("✅ Estrutura do arquivo de população identificada!")
+    
+    # Lista de colunas que são faixas etárias
+    age_columns_pop = [col for col in df_pop.columns if col not in ['RegiaÞo', 'ClassificaçaÞo', 'Ano', 'Total', 'Idade ignorada']]
+    
+    st.write(f"**Colunas de faixa etária identificadas:** {age_columns_pop}")
+    
+    # Transformar o formato wide para long
+    df_pop_long = pd.melt(
+        df_pop, 
+        id_vars=['RegiaÞo', 'Ano'],
+        value_vars=age_columns_pop,
+        var_name='AgeGroup',
+        value_name='Population'
+    )
+    
+    # Renomear colunas
+    df_pop_long = df_pop_long.rename(columns={
+        'RegiaÞo': 'Region',
+        'Ano': 'Year'
+    })
+    
+    # Processar faixas etárias
+    df_pop_long['AgeGroup'] = df_pop_long['AgeGroup'].map(harmonize_age_group)
+    df_pop_long['Population'] = pd.to_numeric(df_pop_long['Population'], errors='coerce').fillna(0)
+    df_pop_long['Year'] = pd.to_numeric(df_pop_long['Year'], errors='coerce').dropna().astype(int)
+    
+    df_pop = df_pop_long
+    st.success("✅ Dados de população transformados para formato longo!")
+    
+else:
+    # Método original para população
+    cols_pop = {
+        "region": coalesce_columns(df_pop, "região", [["regiao","região","uf","region","estado","uf_regiao"]]),
+        "year": coalesce_columns(df_pop, "ano", [["ano","year","periodo","anoreferencia"]]),
+        "age": coalesce_columns(df_pop, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup","faixaetaria","faixa_etaria"]]),
+        "population": coalesce_columns(df_pop, "população", [["populacao","population","habitantes","pop","populacaoresidente"]]),
+    }
+    
+    if all(cols_pop.values()):
+        df_pop = df_pop.rename(columns={
+            cols_pop["region"]: "Region", 
+            cols_pop["year"]: "Year", 
+            cols_pop["age"]: "AgeGroup", 
+            cols_pop["population"]: "Population"
+        })
 
 # Adicionar coluna Sex se não existir
-if cols_ob["sex"]:
-    df_ob = df_ob.rename(columns={cols_ob["sex"]: "Sex"})
-else:
+if "Sex" not in df_ob.columns:
     df_ob["Sex"] = "Todos"
 
-# Processar dados
-df_ob["AgeGroup"] = df_ob["AgeGroup"].astype(str).map(harmonize_age_group)
-df_pop["AgeGroup"] = df_pop["AgeGroup"].astype(str).map(harmonize_age_group)
+# Mostrar preview dos dados processados
+st.subheader("Preview dos Dados Processados")
+col1, col2 = st.columns(2)
 
-# Converter colunas numéricas
-df_ob["Deaths"] = pd.to_numeric(df_ob["Deaths"], errors='coerce').fillna(0)
-df_pop["Population"] = pd.to_numeric(df_pop["Population"], errors='coerce').fillna(0)
-df_ob["Year"] = pd.to_numeric(df_ob["Year"], errors='coerce').dropna().astype(int)
-df_pop["Year"] = pd.to_numeric(df_pop["Year"], errors='coerce').dropna().astype(int)
+with col1:
+    st.write("Dados de Óbitos (primeiras 10 linhas):")
+    st.dataframe(df_ob.head(10))
+
+with col2:
+    st.write("Dados de População (primeiras 10 linhas):")
+    st.dataframe(df_pop.head(10))
+
+# Verificar se temos os dados necessários
+required_cols_ob = ["Region", "Year", "AgeGroup", "Deaths"]
+required_cols_pop = ["Region", "Year", "AgeGroup", "Population"]
+
+missing_ob = [col for col in required_cols_ob if col not in df_ob.columns]
+missing_pop = [col for col in required_cols_pop if col not in df_pop.columns]
+
+if missing_ob or missing_pop:
+    st.error("Colunas obrigatórias não encontradas após processamento:")
+    if missing_ob:
+        st.write(f"Óbitos: {missing_ob}")
+    if missing_pop:
+        st.write(f"População: {missing_pop}")
+    st.stop()
 
 # ------------------------------
-# Filtros
+# Resto do código permanece igual...
 # ------------------------------
+
+# [O restante do código dos filtros e cálculos permanece igual...]
 
 st.sidebar.subheader("Filtros")
 
