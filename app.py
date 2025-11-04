@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 import io
+import os
 
 # Configuração da página
 st.set_page_config(
@@ -25,37 +26,28 @@ st.markdown("""
 # ------------------------------
 
 @st.cache_data
-def read_csv_safely(file):
+def read_csv_safely(file_path):
     """Lê arquivos CSV com tratamento robusto de encoding e separadores"""
     try:
-        # Ler o conteúdo do arquivo
-        content = file.getvalue().decode('utf-8')
-    except:
-        try:
-            content = file.getvalue().decode('latin-1')
-        except:
-            content = file.getvalue().decode('windows-1252')
-    
-    # Verificar o separador
-    if ';' in content.split('\n')[0]:
-        separator = ';'
-    else:
-        separator = ','
-    
-    # Ler o CSV
-    try:
-        df = pd.read_csv(io.StringIO(content), sep=separator, encoding='utf-8')
-        return df
-    except:
-        try:
-            df = pd.read_csv(io.StringIO(content), sep=separator, encoding='latin-1')
-            return df
-        except Exception as e:
-            st.error(f"Erro detalhado: {str(e)}")
-            # Mostrar preview do conteúdo para debug
-            st.text("Preview do arquivo (primeiras 500 caracteres):")
-            st.text(content[:500])
-            return pd.DataFrame()
+        # Tentar diferentes encodings e separadores
+        encodings = ['utf-8', 'latin-1', 'windows-1252', 'iso-8859-1']
+        separators = [';', ',']
+        
+        for encoding in encodings:
+            for separator in separators:
+                try:
+                    df = pd.read_csv(file_path, sep=separator, encoding=encoding)
+                    if not df.empty:
+                        st.success(f"Arquivo lido com encoding: {encoding}, separador: '{separator}'")
+                        return df
+                except:
+                    continue
+        
+        # Última tentativa com parâmetros padrão
+        return pd.read_csv(file_path)
+    except Exception as e:
+        st.error(f"Erro ao ler arquivo {file_path}: {str(e)}")
+        return pd.DataFrame()
 
 def detect_column_names(df):
     """Detecta e corrige nomes de colunas com caracteres especiais"""
@@ -236,61 +228,163 @@ def processar_dados_para_analise(obitos_long, populacao_long):
     return resultados, obitos_long, populacao_long
 
 # ------------------------------
+# Carregamento Automático dos Arquivos
+# ------------------------------
+
+def carregar_arquivos_automaticamente():
+    """Carrega automaticamente os arquivos do repositório"""
+    arquivos_encontrados = {}
+    
+    # Procurar por arquivos CSV no diretório
+    arquivos_csv = [f for f in os.listdir('.') if f.endswith('.csv')]
+    
+    st.sidebar.info(f"Arquivos CSV encontrados: {arquivos_csv}")
+    
+    # Procurar por arquivos específicos
+    possiveis_nomes_obitos = [
+        'Dados de Obitos.csv', 'Dados de Óbitos.csv', 'obitos.csv', 
+        'dados_obitos.csv', 'mortalidade.csv'
+    ]
+    
+    possiveis_nomes_populacao = [
+        'Dados de População.csv', 'Dados de Populacao.csv', 'populacao.csv',
+        'dados_populacao.csv', 'populacao.csv'
+    ]
+    
+    # Tentar encontrar arquivo de óbitos
+    for nome in possiveis_nomes_obitos:
+        if os.path.exists(nome):
+            arquivos_encontrados['obitos'] = nome
+            break
+    else:
+        # Se não encontrou pelos nomes específicos, usar o primeiro CSV
+        if arquivos_csv:
+            arquivos_encontrados['obitos'] = arquivos_csv[0]
+    
+    # Tentar encontrar arquivo de população
+    for nome in possiveis_nomes_populacao:
+        if os.path.exists(nome):
+            arquivos_encontrados['populacao'] = nome
+            break
+    else:
+        # Se não encontrou pelos nomes específicos, usar o segundo CSV
+        if len(arquivos_csv) > 1:
+            arquivos_encontrados['populacao'] = arquivos_csv[1]
+    
+    return arquivos_encontrados
+
+# ------------------------------
 # Interface Principal
 # ------------------------------
 
-st.sidebar.header("📁 Carregamento de Dados")
-st.sidebar.markdown("Faça upload dos arquivos CSV:")
+st.sidebar.header("📁 Configuração dos Dados")
 
-uploaded_obitos = st.sidebar.file_uploader("Dados de Óbitos por Leucemia", type=['csv'], key='obitos')
-uploaded_populacao = st.sidebar.file_uploader("Dados de População", type=['csv'], key='populacao')
+# Verificar se existem arquivos no repositório
+arquivos = carregar_arquivos_automaticamente()
 
-if uploaded_obitos and uploaded_populacao:
+if arquivos.get('obitos') and arquivos.get('populacao'):
+    st.sidebar.success("✅ Arquivos encontrados automaticamente!")
+    st.sidebar.write(f"**Óbitos:** {arquivos['obitos']}")
+    st.sidebar.write(f"**População:** {arquivos['populacao']}")
     
-    with st.spinner("Lendo e processando arquivos..."):
-        # Ler arquivos
+    use_auto = st.sidebar.checkbox("Usar arquivos automáticos", value=True)
+else:
+    st.sidebar.warning("⚠️ Arquivos não encontrados automaticamente")
+    use_auto = False
+
+if use_auto and arquivos.get('obitos') and arquivos.get('populacao'):
+    # Usar arquivos automáticos
+    df_obitos = read_csv_safely(arquivos['obitos'])
+    df_populacao = read_csv_safely(arquivos['populacao'])
+else:
+    # Upload manual
+    st.sidebar.header("📤 Upload Manual")
+    uploaded_obitos = st.sidebar.file_uploader("Dados de Óbitos por Leucemia", type=['csv'], key='obitos')
+    uploaded_populacao = st.sidebar.file_uploader("Dados de População", type=['csv'], key='populacao')
+    
+    if uploaded_obitos and uploaded_populacao:
         df_obitos = read_csv_safely(uploaded_obitos)
         df_populacao = read_csv_safely(uploaded_populacao)
+    else:
+        df_obitos = pd.DataFrame()
+        df_populacao = pd.DataFrame()
+
+# ------------------------------
+# Filtros na Sidebar
+# ------------------------------
+
+if not df_obitos.empty and not df_populacao.empty:
+    st.sidebar.header("⚙️ Filtros de Análise")
+    
+    # Processar dados para obter anos disponíveis
+    with st.spinner("Preparando dados para filtros..."):
+        df_obitos_corr = detect_column_names(df_obitos)
+        df_populacao_corr = detect_column_names(df_populacao)
         
-        if not df_obitos.empty and not df_populacao.empty:
-            # Corrigir nomes de colunas
-            df_obitos = detect_column_names(df_obitos)
-            df_populacao = detect_column_names(df_populacao)
+        obitos_long = transform_to_long_format(df_obitos_corr, 'Obitos')
+        populacao_long = transform_to_long_format(df_populacao_corr, 'Populacao')
+        
+        # Obter anos disponíveis
+        anos_obitos = sorted(obitos_long['Ano'].unique())
+        anos_populacao = sorted(populacao_long['Ano'].unique())
+        anos_disponiveis = sorted(list(set(anos_obitos) & set(anos_populacao)))
+    
+    if anos_disponiveis:
+        # Filtro de anos com multiselect
+        st.sidebar.subheader("Seleção de Anos")
+        anos_selecionados = st.sidebar.multiselect(
+            "Selecione os anos para análise:",
+            options=anos_disponiveis,
+            default=anos_disponiveis  # Todos selecionados por padrão
+        )
+        
+        # Filtro de período com slider
+        st.sidebar.subheader("Período de Análise")
+        ano_min = min(anos_disponiveis)
+        ano_max = max(anos_disponiveis)
+        
+        periodo = st.sidebar.slider(
+            "Selecione o período:",
+            min_value=ano_min,
+            max_value=ano_max,
+            value=(ano_min, ano_max),
+            step=1
+        )
+        
+        # Filtro de regiões
+        st.sidebar.subheader("Seleção de Regiões")
+        regioes_disponiveis = sorted(obitos_long['Regiao'].unique())
+        regioes_selecionadas = st.sidebar.multiselect(
+            "Selecione as regiões:",
+            options=regioes_disponiveis,
+            default=regioes_disponiveis
+        )
+        
+        # Aplicar filtros
+        aplicar_filtros = st.sidebar.button("Aplicar Filtros")
+        
+        if aplicar_filtros or not anos_selecionados:
+            # Usar período do slider se nenhum ano específico foi selecionado
+            if not anos_selecionados:
+                anos_selecionados = [ano for ano in anos_disponiveis if periodo[0] <= ano <= periodo[1]]
             
-            # Mostrar preview dos dados originais
-            st.subheader("📋 Preview dos Dados Originais")
+            # Filtrar dados
+            obitos_filtrado = obitos_long[
+                (obitos_long['Ano'].isin(anos_selecionados)) & 
+                (obitos_long['Regiao'].isin(regioes_selecionadas))
+            ]
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Dados de Óbitos:**")
-                st.dataframe(df_obitos.head(3), use_container_width=True)
-                st.write(f"Forma: {df_obitos.shape} | Colunas: {list(df_obitos.columns)}")
+            populacao_filtrado = populacao_long[
+                (populacao_long['Ano'].isin(anos_selecionados)) & 
+                (populacao_long['Regiao'].isin(regioes_selecionadas))
+            ]
             
-            with col2:
-                st.write("**Dados de População:**")
-                st.dataframe(df_populacao.head(3), use_container_width=True)
-                st.write(f"Forma: {df_populacao.shape} | Colunas: {list(df_populacao.columns)}")
-            
-            # Transformar para formato longo
-            st.subheader("🔄 Transformação dos Dados")
-            
-            obitos_long = transform_to_long_format(df_obitos, 'Obitos')
-            populacao_long = transform_to_long_format(df_populacao, 'Populacao')
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Óbitos (formato longo):**")
-                st.dataframe(obitos_long.head(5), use_container_width=True)
-            
-            with col2:
-                st.write("**População (formato longo):**")
-                st.dataframe(populacao_long.head(5), use_container_width=True)
-            
-            # Processar dados para análise
-            resultados, obitos_final, populacao_final = processar_dados_para_analise(obitos_long, populacao_long)
+            # Processar análise com dados filtrados
+            with st.spinner("Processando análise com filtros aplicados..."):
+                resultados, obitos_final, populacao_final = processar_dados_para_analise(obitos_filtrado, populacao_filtrado)
             
             if not resultados.empty:
-                st.success("✅ Dados processados com sucesso!")
+                st.success(f"✅ Análise filtrada: {len(anos_selecionados)} anos, {len(regioes_selecionadas)} regiões")
                 
                 # ------------------------------
                 # ANÁLISE E VISUALIZAÇÕES
@@ -315,8 +409,16 @@ if uploaded_obitos and uploaded_populacao:
                     st.metric("CMP Médio", f"{avg_cmp:.2f}")
                 
                 with col4:
-                    regioes = resultados['Regiao'].nunique()
-                    st.metric("Regiões Analisadas", regioes)
+                    anos_analisados = resultados['Ano'].nunique()
+                    st.metric("Anos Analisados", anos_analisados)
+                
+                # Informações do Filtro
+                st.info(f"""
+                **Filtros Aplicados:**
+                - Período: {min(anos_selecionados)} - {max(anos_selecionados)}
+                - Regiões: {', '.join(regioes_selecionadas)}
+                - Total de anos: {len(anos_selecionados)}
+                """)
                 
                 # Gráficos de Evolução Temporal
                 st.subheader("Evolução Temporal dos Coeficientes")
@@ -355,7 +457,7 @@ if uploaded_obitos and uploaded_populacao:
                 st.subheader("Análise por Faixa Etária")
                 
                 # Distribuição de óbitos
-                dist_obitos = obitos_long.groupby(['Regiao', 'FaixaEtaria'])['Obitos'].sum().reset_index()
+                dist_obitos = obitos_final.groupby(['Regiao', 'FaixaEtaria'])['Obitos'].sum().reset_index()
                 dist_obitos['Percentual'] = dist_obitos.groupby('Regiao')['Obitos'].transform(
                     lambda x: x / x.sum() * 100
                 )
@@ -393,12 +495,15 @@ if uploaded_obitos and uploaded_populacao:
 RELATÓRIO DE ANÁLISE - MORTALIDADE POR LEUCEMIA
 Data de geração: {datetime.now().strftime('%d/%m/%Y %H:%M')}
 
+FILTROS APLICADOS:
+- Período: {min(anos_selecionados)} - {max(anos_selecionados)}
+- Regiões: {', '.join(regioes_selecionadas)}
+- Anos analisados: {len(anos_selecionados)}
+
 RESUMO ESTATÍSTICO:
 - Total de óbitos analisados: {total_obitos:,}
-- Período analisado: {resultados['Ano'].min()} - {resultados['Ano'].max()}
 - CMB médio: {avg_cmb:.2f} óbitos/100.000 hab.
 - CMP médio: {avg_cmp:.2f} óbitos/100.000 hab.
-- Regiões analisadas: {', '.join(resultados['Regiao'].unique())}
 
 METODOLOGIA:
 - Coeficiente de Mortalidade Bruto (CMB): (Óbitos / População) × 100.000
@@ -442,28 +547,26 @@ METODOLOGIA:
                     """)
             
             else:
-                st.error("Não foi possível processar os dados para análise.")
-        
-        else:
-            st.error("Erro: Um ou ambos os arquivos estão vazios ou não puderam ser lidos.")
+                st.error("Não foi possível processar os dados com os filtros selecionados.")
+    
+    else:
+        st.error("Não há anos comuns entre os datasets de óbitos e população.")
 
 else:
-    st.info("👆 Faça upload dos arquivos CSV para iniciar a análise")
+    st.info("👆 Configure os dados na sidebar para iniciar a análise")
     
     # Instruções
     st.markdown("""
     ### 📝 Instruções para Uso:
     
-    1. **Faça upload dos dois arquivos CSV:**
-       - Dados de Óbitos por Leucemia
-       - Dados de População
+    1. **Configuração dos Dados:**
+       - O sistema tentará encontrar automaticamente os arquivos no repositório
+       - Se não encontrar, use o upload manual na sidebar
     
-    2. **Estrutura esperada dos arquivos:**
-       ```csv
-       Regiao;Ano;Menor 1 ano;1 a 4 anos;5 a 9 anos;...;80 anos e mais;Total
-       Nordeste;2010;100;150;120;...;80;1500
-       Sudeste;2010;120;130;110;...;90;1600
-       ```
+    2. **Aplicar Filtros:**
+       - Selecione os anos desejados na sidebar
+       - Escolha as regiões para análise
+       - Clique em "Aplicar Filtros"
     
     3. **A análise incluirá:**
        - Cálculo do Coeficiente de Mortalidade Bruto (CMB)
