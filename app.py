@@ -1,9 +1,11 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import io
 import math
 import matplotlib.pyplot as plt
+import os
 
 st.set_page_config(page_title="Painel de Mortalidade por Leucemia (Nordeste x Sudeste)", layout="wide")
 
@@ -85,8 +87,7 @@ def harmonize_age_group(s):
     parts = s.split("-")
     if len(parts) == 2:
         try:
-            a = int(parts[0])
-            b = int(parts[1])
+            a = int(parts[0]); b = int(parts[1])
             return f"{a}-{b}"
         except Exception:
             pass
@@ -105,45 +106,108 @@ def direct_standardization(deaths_by_age, pop_by_age, std_df):
     return cmp_value
 
 # ------------------------------
-# Carregamento de dados
+# Carregamento de dados (prioriza diretório do app)
 # ------------------------------
 
-st.sidebar.header("Configurações")
-st.sidebar.markdown("Envie os dois arquivos CSV obrigatórios para continuar.")
+st.sidebar.header("Dados")
+st.sidebar.caption("O app tentará carregar os CSVs do **mesmo diretório** do arquivo .py. Se não encontrar, você pode enviar abaixo.")
 
-uploaded_obitos = st.sidebar.file_uploader("Dados de Óbitos (.csv)", type=["csv"], key="obitos")
-uploaded_pop = st.sidebar.file_uploader("Dados de População (.csv)", type=["csv"], key="pop")
+def candidate_paths(filename_variants):
+    # tenta no diretório do arquivo e no diretório atual
+    here = os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
+    paths = []
+    for name in filename_variants:
+        paths.append(os.path.join(here, name))
+        paths.append(os.path.join(os.getcwd(), name))
+    # remover duplicados mantendo ordem
+    seen = set(); ordered = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p); ordered.append(p)
+    return ordered
 
-if uploaded_obitos is None or uploaded_pop is None:
-    st.warning("Envie ambos os arquivos: **Óbitos** e **População** para iniciar a análise.")
+obitos_variants = ["Dados de Óbitos.csv", "Dados de Obitos.csv"]
+pop_variants = ["Dados de População.csv", "Dados de Populacao.csv"]
+
+df_ob, df_pop = None, None
+
+# Tenta ler automaticamente
+for p in candidate_paths(obitos_variants):
+    if os.path.exists(p):
+        try:
+            df_ob = read_csv_safely(p)
+            break
+        except Exception:
+            pass
+
+for p in candidate_paths(pop_variants):
+    if os.path.exists(p):
+        try:
+            df_pop = read_csv_safely(p)
+            break
+        except Exception:
+            pass
+
+# Se não conseguiu, oferece upload como fallback
+uploaded_obitos = None
+uploaded_pop = None
+
+if df_ob is None:
+    uploaded_obitos = st.sidebar.file_uploader("Enviar CSV de Óbitos", type=["csv"], key="obitos_up")
+
+if df_pop is None:
+    uploaded_pop = st.sidebar.file_uploader("Enviar CSV de População", type=["csv"], key="pop_up")
+
+if df_ob is None and uploaded_obitos is not None:
+    df_ob = read_csv_safely(uploaded_obitos)
+
+if df_pop is None and uploaded_pop is not None:
+    df_pop = read_csv_safely(uploaded_pop)
+
+if df_ob is None or df_pop is None:
+    st.error("Não foi possível localizar **ambos** os arquivos no diretório do app e nenhum upload foi fornecido. Verifique os nomes e tente novamente.")
     st.stop()
-
-df_ob = read_csv_safely(uploaded_obitos)
-df_pop = read_csv_safely(uploaded_pop)
 
 # ------------------------------
 # Mapeamento de colunas
 # ------------------------------
 
 cols_ob = {
-    "region": coalesce_columns(df_ob, "região", [["regiao","região","uf","region"]]),
-    "year": coalesce_columns(df_ob, "ano", [["ano","year","periodo"]]),
-    "sex": coalesce_columns(df_ob, "sexo", [["sexo","sex","genero"]], required=False),
-    "age": coalesce_columns(df_ob, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup"]]),
-    "deaths": coalesce_columns(df_ob, "óbitos", [["obitos","mortes","deaths"]]),
+    "region": None,
+    "year": None,
+    "sex": None,
+    "age": None,
+    "deaths": None,
 }
 
 cols_pop = {
-    "region": coalesce_columns(df_pop, "região", [["regiao","região","uf","region"]]),
-    "year": coalesce_columns(df_pop, "ano", [["ano","year"]]),
-    "age": coalesce_columns(df_pop, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup"]]),
-    "population": coalesce_columns(df_pop, "população", [["populacao","population","habitantes"]]),
+    "region": None,
+    "year": None,
+    "age": None,
+    "population": None,
 }
 
-allowed_age_groups = WHO_STD["AgeGroup"].tolist()
+def map_columns(df_ob, df_pop):
+    cols_ob = {
+        "region": coalesce_columns(df_ob, "região", [["regiao","região","uf","region"]]),
+        "year": coalesce_columns(df_ob, "ano", [["ano","year","periodo"]]),
+        "sex": coalesce_columns(df_ob, "sexo", [["sexo","sex","genero","gênero"]], required=False),
+        "age": coalesce_columns(df_ob, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup","age_group"]]),
+        "deaths": coalesce_columns(df_ob, "óbitos", [["obitos","óbitos","mortes","deaths","count"]]),
+    }
+    cols_pop = {
+        "region": coalesce_columns(df_pop, "região", [["regiao","região","uf","region"]]),
+        "year": coalesce_columns(df_pop, "ano", [["ano","year"]]),
+        "age": coalesce_columns(df_pop, "faixa etária", [["faixa etaria","idade","grupo etario","agegroup","age_group"]]),
+        "population": coalesce_columns(df_pop, "população", [["populacao","população","population","habitantes","estimativa"]]),
+    }
+    return cols_ob, cols_pop
 
+cols_ob, cols_pop = map_columns(df_ob, df_pop)
+
+# Harmonização
 df_ob = df_ob.rename(columns={
-    cols_ob["region"]:"Region", cols_ob["year"]:"Year", cols_ob["sex"]:"Sex" if cols_ob["sex"] else "Sex",
+    cols_ob["region"]:"Region", cols_ob["year"]:"Year", (cols_ob["sex"] or "Sex"):"Sex",
     cols_ob["age"]:"AgeGroup", cols_ob["deaths"]:"Deaths"
 })
 df_pop = df_pop.rename(columns={
@@ -167,13 +231,14 @@ sel_sex = st.sidebar.multiselect("Sexo", sorted(df_ob["Sex"].dropna().unique().t
 sel_year_range = st.sidebar.slider("Período (anos)", min_value=int(min(years)), max_value=int(max(years)), value=(int(min(years)), int(max(years))), step=1)
 
 std_choice = st.sidebar.selectbox("População Padrão", ["WHO 2000-2025 (OMS)", "Arquivo CSV (AgeGroup, StdPop)"])
+WHO_STD = WHO_STD  # already defined
 std_df = WHO_STD.copy()
 if std_choice == "Arquivo CSV (AgeGroup, StdPop)":
     up = st.sidebar.file_uploader("População Padrão (CSV)", type=["csv"], key="stdpop")
     if up is not None:
         tmp = read_csv_safely(up)
-        cand_age = find_col(tmp, ["agegroup","faixa etaria"])
-        cand_std = find_col(tmp, ["stdpop","populacao padrao"])
+        cand_age = find_col(tmp, ["agegroup","age_group","faixa etaria","faixa_etaria","idade","grupo etario","grupo etário"])
+        cand_std = find_col(tmp, ["stdpop","populacao padrao","populacao_padrao","standard","peso","peso padrao"])
         if cand_age and cand_std:
             tmp = tmp.rename(columns={cand_age:"AgeGroup", cand_std:"StdPop"})[["AgeGroup","StdPop"]]
             tmp["AgeGroup"] = tmp["AgeGroup"].map(harmonize_age_group)
@@ -183,7 +248,7 @@ if std_choice == "Arquivo CSV (AgeGroup, StdPop)":
                 std_df = tmp
 
 # ------------------------------
-# Cálculos
+# Cálculos CMB/CMP
 # ------------------------------
 
 mask_ob = (df_ob["Region"].isin(sel_regions)) & (df_ob["Sex"].isin(sel_sex)) & (df_ob["Year"].between(sel_year_range[0], sel_year_range[1]))
@@ -202,11 +267,12 @@ cmb["CMB (óbitos/100.000)"] = np.where(cmb["Population"]>0, (cmb["Deaths"] / cm
 deaths_age = ob.groupby(["Region","AgeGroup"], as_index=False)["Deaths"].sum()
 pop_mid_age = pop[pop["Year"] == mid_year].groupby(["Region","AgeGroup"], as_index=False)["Population"].sum()
 cmp_rows = []
+age_order = std_df["AgeGroup"].tolist()
 for region in sorted(deaths_age["Region"].unique().tolist()):
     d = deaths_age[deaths_age["Region"]==region].set_index("AgeGroup")["Deaths"]
     p = pop_mid_age[pop_mid_age["Region"]==region].set_index("AgeGroup")["Population"]
-    d = d.reindex(std_df["AgeGroup"]).fillna(0)
-    p = p.reindex(std_df["AgeGroup"]).fillna(0)
+    d = d.reindex(age_order).fillna(0)
+    p = p.reindex(age_order).fillna(0)
     cmp_val = direct_standardization(d, p, std_df)
     cmp_rows.append({"Region": region, "CMP (óbitos/100.000)": cmp_val})
 cmp = pd.DataFrame(cmp_rows)
@@ -221,9 +287,43 @@ st.dataframe(cmb, use_container_width=True)
 st.subheader("Coeficiente de Mortalidade Padronizado (CMP)")
 st.dataframe(cmp, use_container_width=True)
 
+# Tendências (opcional — rápidas)
+st.markdown("---")
+st.subheader("Tendências ao longo do tempo")
+
+series_rows = []
+for region in sel_regions:
+    for year in range(sel_year_range[0], sel_year_range[1]+1):
+        ob_y = ob[(ob["Region"]==region) & (ob["Year"]==year)]
+        pop_y = pop[(pop["Region"]==region) & (pop["Year"]==year)]
+        deaths_total = ob_y["Deaths"].sum()
+        pop_total = pop_y["Population"].sum()
+        cmb_y = (deaths_total / pop_total) * 100000.0 if pop_total>0 else np.nan
+        d_age = ob_y.groupby("AgeGroup")["Deaths"].sum()
+        p_age = pop_y.groupby("AgeGroup")["Population"].sum()
+        d_age = d_age.reindex(age_order).fillna(0)
+        p_age = p_age.reindex(age_order).fillna(0)
+        cmp_y = direct_standardization(d_age, p_age, std_df)
+        series_rows.append({"Region":region, "Year":year, "CMB":cmb_y, "CMP":cmp_y})
+
+series = pd.DataFrame(series_rows)
+
+if not series.empty:
+    fig1, ax1 = plt.subplots()
+    for region in sel_regions:
+        s = series[series["Region"]==region].sort_values("Year")
+        ax1.plot(s["Year"], s["CMB"], label=str(region))
+    ax1.set_xlabel("Ano"); ax1.set_ylabel("CMB (óbitos por 100.000)"); ax1.set_title("Tendência do CMB"); ax1.legend()
+    st.pyplot(fig1)
+
+    fig2, ax2 = plt.subplots()
+    for region in sel_regions:
+        s = series[series["Region"]==region].sort_values("Year")
+        ax2.plot(s["Year"], s["CMP"], label=str(region))
+    ax2.set_xlabel("Ano"); ax2.set_ylabel("CMP (óbitos por 100.000)"); ax2.set_title("Tendência do CMP (padronizado)"); ax2.legend()
+    st.pyplot(fig2)
+
+# Ética
 st.markdown("---")
 st.subheader("Considerações Éticas")
-st.markdown("""
-Trata-se de **dados públicos e anonimizados**.  
-De acordo com a **Resolução CNS nº 510/2016**, o estudo dispensa submissão a Comitê de Ética em Pesquisa.
-""")
+st.markdown("Dados públicos e anonimizados. Conforme a **Resolução CNS nº 510/2016**, o estudo dispensa submissão ao CEP.")
