@@ -1,385 +1,509 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Dict, List, Tuple
-from unidecode import unidecode
+import seaborn as sns
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
 
-# ========= CONFIG =========
-st.set_page_config(page_title="Mortalidade por Leucemia - Nordeste x Sudeste", layout="wide")
+# Configuração da página
+st.set_page_config(page_title="Análise de Mortalidade por Leucemia", layout="wide")
 
-DATA_DIR = Path(".")  # os .csv devem estar no mesmo diretório do app
-FILE_OBITOS = DATA_DIR / "Obitos_regiões.csv"
-FILE_POP_REGIOES = DATA_DIR / "Pop_regiões.csv"
-FILE_POP_BR = DATA_DIR / "Pop_BR.csv"
+# Título principal
+st.title("📊 Análise de Mortalidade por Leucemia - Nordeste vs Sudeste")
+st.markdown("---")
 
-# ========= HELPERS =========
-def norm(s: str) -> str:
-    return (
-        unidecode(s)
-        .strip()
-        .lower()
-        .replace("  ", " ")
-        .replace("-", " ")
-        .replace(".", "")
-        .replace("/", " ")
-        .replace("\\", " ")
-    )
+@st.cache_data
+def carregar_dados():
+    """Carrega e prepara os dados dos arquivos CSV"""
+    
+    # Carregar dados de óbitos
+    obitos_df = pd.read_csv("Obitos_regiões.csv")
+    
+    # Carregar dados populacionais regionais
+    pop_regioes_df = pd.read_csv("Pop_regiões.csv")
+    
+    # Carregar população padrão do Brasil
+    pop_br_df = pd.read_csv("Pop_BR.csv")
+    
+    return obitos_df, pop_regioes_df, pop_br_df
 
-COLMAP = {
-    "regiao": {"regiao", "região", "uf", "macroregiao", "macrorregiao", "region"},
-    "ano": {"ano", "periodo", "período", "year"},
-    "faixa": {"faixa etaria", "faixa_etaria", "grupo etario", "grupo_etario", "idade", "grupo etario ibge", "grupo_etario_ibge"},
-    "obitos": {"obitos", "óbitos", "obitos leucemia", "obitos_leucemia", "deaths", "obitos total", "obitos_total"},
-    "pop": {"populacao", "população", "population", "pop_total", "pop", "populacao total"},
-    "pop_padrao": {"populacao padrao", "populacao_padrao", "pop padrao", "pop_padrao", "padrao", "standard population", "populacao brasil", "pop_br"},
-}
+# Carregar dados
+obitos_df, pop_regioes_df, pop_br_df = carregar_dados()
 
-def auto_map_columns(df: pd.DataFrame, required: List[str]) -> Dict[str, str]:
-    """Tenta mapear nomes de colunas do df para chaves lógicas em 'required'."""
-    candidates = {k: {norm(x) for x in COLMAP.get(k, set())} for k in COLMAP}
-    normalized_cols = {norm(c): c for c in df.columns}
-    mapping = {}
-    for need in required:
-        found = None
-        for col_norm, original in normalized_cols.items():
-            if need in candidates and ((col_norm in candidates[need]) or (need == col_norm)):
-                found = original
-                break
-        # fallback por similaridade simples
-        if not found:
-            for col_norm, original in normalized_cols.items():
-                if any(token in col_norm for token in candidates.get(need, [])):
-                    found = original
-                    break
-        if not found:
-            # tentativa por início/contém
-            for col_norm, original in normalized_cols.items():
-                if need in col_norm or col_norm in candidates.get(need, set()):
-                    found = original
-                    break
-        if not found:
-            raise ValueError(f"Não foi possível identificar a coluna para '{need}'. Colunas disponíveis: {list(df.columns)}")
-        mapping[need] = found
-    return mapping
+# Sidebar para navegação
+st.sidebar.title("Navegação")
+pagina = st.sidebar.radio("Selecione a análise:", 
+                         ["Visão Geral", 
+                          "Coeficiente de Mortalidade Bruto", 
+                          "Taxa de Mortalidade por Idade",
+                          "Padronização por Idade",
+                          "Análise de Tendência"])
 
-def read_csv_smart(path: Path) -> pd.DataFrame:
-    # tenta encoding comum
-    for enc in ["utf-8", "latin1", "cp1252"]:
-        try:
-            return pd.read_csv(path, encoding=enc)
-        except Exception:
-            continue
-    # fallback ao pandas default
-    return pd.read_csv(path)
+# Funções de cálculo
+def calcular_cmb(obitos_df, pop_regioes_df):
+    """Calcula o Coeficiente de Mortalidade Bruto"""
+    
+    # Agrupar óbitos totais por região e ano
+    obitos_totais = obitos_df.groupby(['Região', 'Ano'])['Obitos'].sum().reset_index()
+    obitos_totais.rename(columns={'Obitos': 'Obitos_Totais'}, inplace=True)
+    
+    # Calcular população total por região e ano
+    pop_total = pop_regioes_df.groupby(['Região', 'Ano'])['População'].sum().reset_index()
+    pop_total.rename(columns={'População': 'Pop_Total'}, inplace=True)
+    
+    # Combinar dados
+    cmb_df = pd.merge(obitos_totais, pop_total, on=['Região', 'Ano'])
+    
+    # Calcular CMB
+    cmb_df['CMB'] = (cmb_df['Obitos_Totais'] / cmb_df['Pop_Total']) * 100000
+    
+    return cmb_df
 
-@st.cache_data(show_spinner=False)
-def load_data():
-    ob = read_csv_smart(FILE_OBITOS)
-    pr = read_csv_smart(FILE_POP_REGIOES)
-    pb = read_csv_smart(FILE_POP_BR)
+def calcular_tmi(obitos_df, pop_regioes_df):
+    """Calcula a Taxa de Mortalidade por Idade (TMI)"""
+    
+    # Combinar dados de óbitos e população por faixa etária
+    tmi_df = pd.merge(obitos_df, pop_regioes_df, 
+                     on=['Região', 'Ano', 'Faixa_Etaria'])
+    
+    # Calcular TMI
+    tmi_df['TMI'] = (tmi_df['Obitos'] / tmi_df['População']) * 100000
+    
+    return tmi_df
 
-    # mapear colunas
-    map_ob = auto_map_columns(ob, ["regiao", "ano", "faixa", "obitos"])
-    map_pr = auto_map_columns(pr, ["regiao", "ano", "faixa", "pop"])
-    # População padrão pode ter apenas faixa e população (sem ano)
-    try:
-        map_pb = auto_map_columns(pb, ["faixa", "pop"])
-        pb = pb.rename(columns={map_pb["faixa"]: "faixa", map_pb["pop"]: "pop_padrao"})
-    except Exception:
-        # pode vir com nome já explícito
-        map_pb = auto_map_columns(pb, ["faixa", "pop_padrao"])
-        pb = pb.rename(columns={map_pb["faixa"]: "faixa", map_pb["pop_padrao"]: "pop_padrao"})
+def padronizar_mortalidade(tmi_df, pop_br_df):
+    """Realiza padronização direta por idade"""
+    
+    # Preparar população padrão
+    pop_padrao = pop_br_df.copy()
+    pop_padrao.rename(columns={'Pop_Padrao_BR_2010': 'Pop_Padrao'}, inplace=True)
+    
+    # Combinar TMI com população padrão
+    padronizado_df = pd.merge(tmi_df, pop_padrao, on='Faixa_Etaria')
+    
+    # Calcular óbitos esperados
+    padronizado_df['Obitos_Esperados'] = (padronizado_df['TMI'] * padronizado_df['Pop_Padrao']) / 100000
+    
+    # Calcular taxa padronizada
+    padronizado_agg = padronizado_df.groupby(['Região', 'Ano']).agg({
+        'Obitos_Esperados': 'sum',
+        'Pop_Padrao': 'sum'
+    }).reset_index()
+    
+    padronizado_agg['Taxa_Padronizada'] = (padronizado_agg['Obitos_Esperados'] / padronizado_agg['Pop_Padrao']) * 100000
+    
+    return padronizado_agg
 
-    # renomeia obitos e pop_regioes
-    ob = ob.rename(columns={map_ob["regiao"]: "regiao", map_ob["ano"]: "ano", map_ob["faixa"]: "faixa", map_ob["obitos"]: "obitos"})
-    pr = pr.rename(columns={map_pr["regiao"]: "regiao", map_pr["ano"]: "ano", map_pr["faixa"]: "faixa", map_pr["pop"]: "pop"})
+def analise_tendencia(cmb_df, padronizado_df):
+    """Realiza análise de tendência usando regressão linear"""
+    
+    resultados = {}
+    
+    for regiao in ['Nordeste', 'Sudeste']:
+        # Dados CMB
+        dados_cmb = cmb_df[cmb_df['Região'] == regiao].copy()
+        dados_cmb = dados_cmb.sort_values('Ano')
+        
+        # Dados padronizados
+        dados_pad = padronizado_df[padronizado_df['Região'] == regiao].copy()
+        dados_pad = dados_pad.sort_values('Ano')
+        
+        # Regressão para CMB
+        if len(dados_cmb) > 1:
+            slope_cmb, intercept_cmb, r_value_cmb, p_value_cmb, std_err_cmb = stats.linregress(
+                dados_cmb['Ano'], dados_cmb['CMB']
+            )
+        else:
+            slope_cmb = intercept_cmb = r_value_cmb = p_value_cmb = std_err_cmb = np.nan
+        
+        # Regressão para taxas padronizadas
+        if len(dados_pad) > 1:
+            slope_pad, intercept_pad, r_value_pad, p_value_pad, std_err_pad = stats.linregress(
+                dados_pad['Ano'], dados_pad['Taxa_Padronizada']
+            )
+        else:
+            slope_pad = intercept_pad = r_value_pad = p_value_pad = std_err_pad = np.nan
+        
+        resultados[regiao] = {
+            'CMB': {
+                'slope': slope_cmb,
+                'intercept': intercept_cmb,
+                'r_squared': r_value_cmb**2,
+                'p_value': p_value_cmb,
+                'std_err': std_err_cmb
+            },
+            'Padronizada': {
+                'slope': slope_pad,
+                'intercept': intercept_pad,
+                'r_squared': r_value_pad**2,
+                'p_value': p_value_pad,
+                'std_err': std_err_pad
+            }
+        }
+    
+    return resultados
 
-    # normalizações
-    for df in [ob, pr, pb]:
-        if "regiao" in df.columns:
-            df["regiao"] = df["regiao"].astype(str).str.strip()
-        if "faixa" in df.columns:
-            df["faixa"] = df["faixa"].astype(str).str.strip()
-        if "ano" in df.columns:
-            df["ano"] = pd.to_numeric(df["ano"], errors="coerce").astype("Int64")
+# Calcular métricas
+cmb_df = calcular_cmb(obitos_df, pop_regioes_df)
+tmi_df = calcular_tmi(obitos_df, pop_regioes_df)
+padronizado_df = padronizar_mortalidade(tmi_df, pop_br_df)
+tendencia_resultados = analise_tendencia(cmb_df, padronizado_df)
 
-    # padroniza categorias de faixa etária
-    for df in [ob, pr, pb]:
-        if "faixa" in df.columns:
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.replace(r"\s+", " ", regex=True)
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True).str.replace(r"\s+", " ", regex=True)
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True)
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True).str.replace(r"\s+", " ", regex=True)
-            # Garantia final
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True)
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True).str.replace(r"\s+", " ", regex=True)
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True)
-
-    # Se Pop_BR tiver anos, agrega por faixa
-    if "ano" in pb.columns:
-        pb = pb.groupby("faixa", as_index=False)["pop_padrao"].sum()
-
-    return ob, pr, pb
-
-def ensure_midpoint_population(pr: pd.DataFrame, regiao: str, anos: List[int]) -> Tuple[int, pd.DataFrame]:
-    """Retorna o ano do ponto médio e a tabela de população daquele ano por faixa para a região, com possível interpolação."""
-    anos_validos = sorted([int(a) for a in anos if pd.notnull(a)])
-    if not anos_validos:
-        raise ValueError("Não há anos válidos no filtro.")
-    mid = int(round(np.mean(anos_validos)))
-    # populações disponíveis para a região
-    pr_r = pr.loc[pr["regiao"] == regiao].copy()
-    anos_reg = sorted(pr_r["ano"].dropna().astype(int).unique())
-    if mid in anos_reg:
-        base = pr_r.loc[pr_r["ano"] == mid, ["faixa", "pop"]].copy()
-        base["ano"] = mid
-        return mid, base
-    # interpolação simples por faixa etária
-    def interp_for_group(g):
-        g = g.sort_values("ano")
-        return np.interp(mid, g["ano"], g["pop"])
-    est = pr_r.groupby("faixa").apply(interp_for_group).rename("pop").reset_index()
-    est["ano"] = mid
-    return mid, est[["faixa", "pop", "ano"]]
-
-def compute_tmi(ob: pd.DataFrame, pr: pd.DataFrame) -> pd.DataFrame:
-    """TMI_i por regiao, ano e faixa = obitos / pop (no mesmo ano)."""
-    m = pd.merge(ob, pr, on=["regiao", "ano", "faixa"], how="inner")
-    m["tmi"] = m["obitos"] / m["pop"]
-    return m
-
-def compute_cmb(ob: pd.DataFrame, pr: pd.DataFrame, anos_sel: List[int]) -> pd.DataFrame:
-    """CMB por regiao e ano_ponto_medio do período selecionado.
-    OBS: respeita filtros de faixa etária ao receber 'pr' já filtrado.
-    """
-    out_rows = []
-    for reg in sorted(ob["regiao"].unique()):
-        anos_reg = sorted(ob.loc[ob["regiao"] == reg, "ano"].dropna().astype(int).unique())
-        anos_periodo = [a for a in anos_sel if a in anos_reg]
-        if not anos_periodo:
-            continue
-        mid, pop_mid = ensure_midpoint_population(pr, reg, anos_periodo)
-        # total de óbitos no período (apenas das faixas filtradas, pois 'ob' já vem filtrado)
-        total_obitos = ob.loc[(ob["regiao"] == reg) & (ob["ano"].isin(anos_periodo)), "obitos"].sum()
-        # população total no ponto médio (somar sobre faixas filtradas em 'pr')
-        pop_total_mid = pop_mid["pop"].sum()
-        cmb = (total_obitos / pop_total_mid) * 100000.0 if pop_total_mid > 0 else np.nan
-        out_rows.append({"regiao": reg, "periodo_ini": min(anos_periodo), "periodo_fim": max(anos_periodo), "ano_ponto_medio": mid, "obitos_periodo": int(total_obitos), "pop_ponto_medio": float(pop_total_mid), "CMB_100k": float(cmb)})
-    return pd.DataFrame(out_rows)
-
-def compute_padronizado_direto(ob: pd.DataFrame, pr: pd.DataFrame, pb: pd.DataFrame) -> pd.DataFrame:
-    """Taxa padronizada direta por regiao e ano usando Pop_BR como padrão.
-    Resultado expresso por 100.000 habitantes.
-    """
-    # pesos da população padrão
-    pb_use = pb.copy()
-    total_padrao = pb_use["pop_padrao"].sum()
-    pb_use["peso"] = pb_use["pop_padrao"] / total_padrao
-
-    # unir óbitos, população regional e pesos por faixa
-    m = pd.merge(ob, pr, on=["regiao", "ano", "faixa"], how="inner")
-    m = pd.merge(m, pb_use[["faixa", "peso"]], on="faixa", how="inner")
-    # taxa específica por faixa
-    m["tmi"] = m["obitos"] / m["pop"]
-    # taxa padronizada (soma das taxas específicas ponderadas pelos pesos)
-    pad = m.groupby(["regiao", "ano"], as_index=False).apply(lambda g: pd.Series({
-        "taxa_padronizada_100k": float((g["tmi"] * g["peso"]).sum() * 100000.0),
-        "taxa_bruta_100k": float((g["obitos"].sum() / g["pop"].sum()) * 100000.0 if g["pop"].sum() > 0 else np.nan),
-        "obitos": int(g["obitos"].sum()),
-        "pop": float(g["pop"].sum())
-    })).reset_index().drop(columns=["level_2"], errors="ignore")
-    return pad
-
-def plot_lines(df: pd.DataFrame, y: str, title: str):
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    for reg, g in df.sort_values("ano").groupby("regiao"):
-        ax.plot(g["ano"], g[y], marker="o", label=reg)
-    ax.set_xlabel("Ano")
-    ax.set_ylabel(y.replace("_", " "))
-    ax.set_title(title)
+# Página: Visão Geral
+if pagina == "Visão Geral":
+    st.header("📈 Visão Geral dos Dados")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Dados de Óbitos")
+        st.dataframe(obitos_df.head(10), use_container_width=True)
+        st.write(f"Total de registros de óbitos: {len(obitos_df):,}")
+        st.write(f"Período: {obitos_df['Ano'].min()} - {obitos_df['Ano'].max()}")
+        
+        # Estatísticas descritivas
+        st.subheader("Estatísticas Descritivas - Óbitos")
+        st.write(obitos_df.groupby('Região')['Obitos'].describe())
+    
+    with col2:
+        st.subheader("Dados Populacionais")
+        st.dataframe(pop_regioes_df.head(10), use_container_width=True)
+        st.write(f"Total de registros populacionais: {len(pop_regioes_df):,}")
+        st.write(f"Anos disponíveis: {sorted(pop_regioes_df['Ano'].unique())}")
+        
+        st.subheader("População Padrão Brasil 2010")
+        st.dataframe(pop_br_df, use_container_width=True)
+    
+    # Gráfico de óbitos totais por ano e região
+    st.subheader("Evolução dos Óbitos Totais por Leucemia")
+    
+    obitos_totais_ano = obitos_df.groupby(['Ano', 'Região'])['Obitos'].sum().reset_index()
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for regiao in obitos_totais_ano['Região'].unique():
+        dados_regiao = obitos_totais_ano[obitos_totais_ano['Região'] == regiao]
+        ax.plot(dados_regiao['Ano'], dados_regiao['Obitos'], 
+                marker='o', label=regiao, linewidth=2)
+    
+    ax.set_xlabel('Ano')
+    ax.set_ylabel('Número de Óbitos')
+    ax.set_title('Evolução dos Óbitos por Leucemia (1979-2022)')
     ax.legend()
     ax.grid(True, alpha=0.3)
     st.pyplot(fig)
-
-def try_import_ruptures():
-    try:
-        import ruptures as rpt
-        return rpt
-    except Exception as e:
-        return None
-
-def joinpoint_analysis(series_df: pd.DataFrame, y: str, max_breaks: int = 2):
-    """Estimativa de pontos de mudança com 'ruptures' e ajuste linear por trechos."""
-    rpt = try_import_ruptures()
-    if rpt is None:
-        st.info("Para a análise de Joinpoint, instale o pacote 'ruptures'. Mostrando apenas a série temporal.")
-        plot_lines(series_df, y, f"Tendência de {y}")
-        return
-
-    s = series_df.sort_values("ano").copy()
-    x = s["ano"].to_numpy().reshape(-1, 1).astype(float)
-    yv = s[y].to_numpy().astype(float)
-    algo = rpt.KernelCPD(kernel="linear").fit(np.column_stack([x.flatten(), yv]))
-    n_bkps = min(max_breaks, max(1, len(s)//4))  # limite razoável
-    # tenta estimativas de 0..max_breaks e escolhe por penalidade BIC simples
-    best_bkps, best_pen = None, np.inf
-    for nb in range(0, n_bkps + 1):
-        try:
-            bkps = algo.predict(n_bkps=nb)
-        except Exception:
-            continue
-        # bkps são índices de fim de segmento; computar SSE básico
-        prev = 0
-        sse = 0.0
-        for b in bkps:
-            xi = x[prev:b].flatten()
-            yi = yv[prev:b]
-            if len(xi) >= 2:
-                A = np.vstack([xi, np.ones_like(xi)]).T
-                m, c = np.linalg.lstsq(A, yi, rcond=None)[0]
-                yhat = m*xi + c
-                sse += float(((yi - yhat) ** 2).sum())
-            prev = b
-        k_params = 2*(len(bkps))  # inclinação e intercepto por segmento aproximado
-        n = len(yv)
-        bic = n*np.log(sse/n if n>0 and sse>0 else 1.0) + k_params*np.log(n if n>0 else 1.0)
-        if bic < best_pen:
-            best_pen, best_bkps = bic, bkps
-
-    # plot
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(s["ano"], yv, marker="o")
-    if best_bkps is not None:
-        prev = 0
-        for b in best_bkps:
-            xi = x[prev:b].flatten()
-            yi = yv[prev:b]
-            if len(xi) >= 2:
-                A = np.vstack([xi, np.ones_like(xi)]).T
-                m, c = np.linalg.lstsq(A, yi, rcond=None)[0]
-                ax.plot(xi, m*xi + c, linewidth=2)
-            if b < len(s):
-                ax.axvline(s.iloc[b-1]["ano"], linestyle="--", alpha=0.5)
-            prev = b
-    ax.set_title(f"Tendência com Joinpoints estimados para {series_df['regiao'].iloc[0]}")
-    ax.set_xlabel("Ano")
-    ax.set_ylabel(y.replace("_", " "))
+    
+    # Distribuição por faixa etária
+    st.subheader("Distribuição de Óbitos por Faixa Etária")
+    
+    obitos_faixa = obitos_df.groupby(['Faixa_Etaria', 'Região'])['Obitos'].sum().reset_index()
+    
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ordem_faixas = [
+        'Menor 1 ano', '1 a 4 anos', '5 a 9 anos', '10 a 14 anos', 
+        '15 a 19 anos', '20 a 29 anos', '30 a 39 anos', '40 a 49 anos',
+        '50 a 59 anos', '60 a 69 anos', '70 a 79 anos', '80 anos e mais'
+    ]
+    
+    obitos_faixa_pivot = obitos_faixa.pivot_table(values='Obitos', index='Faixa_Etaria', columns='Região').reindex(ordem_faixas)
+    
+    obitos_faixa_pivot.plot(kind='bar', ax=ax, width=0.8)
+    ax.set_xlabel('Faixa Etária')
+    ax.set_ylabel('Total de Óbitos')
+    ax.set_title('Distribuição de Óbitos por Faixa Etária (1979-2022)')
+    ax.legend(title='Região')
     ax.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
     st.pyplot(fig)
 
-# ========= UI =========
-st.title("Painel: Mortalidade por Leucemia — Nordeste x Sudeste")
+# Página: Coeficiente de Mortalidade Bruto
+elif pagina == "Coeficiente de Mortalidade Bruto":
+    st.header("📊 Coeficiente de Mortalidade Bruto (CMB)")
+    st.latex(r"CMB = \left( \frac{\text{Número total de óbitos por leucemia no período}}{\text{População total da região no ponto médio do período}} \right) \times 100.000")
+    
+    st.info("💡 **Nota:** Os dados populacionais estão disponíveis apenas para os anos 1980, 1991, 2000 e 2010. O CMB é calculado apenas para esses anos.")
+    
+    # Tabela CMB
+    st.subheader("Tabela - Coeficiente de Mortalidade Bruto")
+    cmb_pivot = cmb_df.pivot_table(values='CMB', index='Ano', columns='Região').reset_index()
+    st.dataframe(cmb_pivot.round(2), use_container_width=True)
+    
+    # Gráfico CMB
+    st.subheader("Evolução do Coeficiente de Mortalidade Bruto")
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for regiao in cmb_df['Região'].unique():
+        dados_regiao = cmb_df[cmb_df['Região'] == regiao]
+        ax.plot(dados_regiao['Ano'], dados_regiao['CMB'], 
+                marker='o', label=regiao, linewidth=2, markersize=8)
+    
+    ax.set_xlabel('Ano')
+    ax.set_ylabel('CMB (óbitos por 100.000 habitantes)')
+    ax.set_title('Coeficiente de Mortalidade Bruto por Leucemia')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+    
+    # Análise comparativa
+    st.subheader("Análise Comparativa")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        cmb_medio = cmb_df.groupby('Região')['CMB'].mean().round(2)
+        st.metric("CMB Médio - Nordeste", f"{cmb_medio['Nordeste']}")
+        st.metric("CMB Médio - Sudeste", f"{cmb_medio['Sudeste']}")
+    
+    with col2:
+        cmb_ultimo = cmb_df[cmb_df['Ano'] == 2010].set_index('Região')['CMB']
+        st.metric("CMB 2010 - Nordeste", f"{cmb_ultimo['Nordeste']:.2f}")
+        st.metric("CMB 2010 - Sudeste", f"{cmb_ultimo['Sudeste']:.2f}")
 
-with st.expander("Sobre os dados e método"):
+# Página: Taxa de Mortalidade por Idade
+elif pagina == "Taxa de Mortalidade por Idade":
+    st.header("👥 Taxa de Mortalidade por Idade (TMI)")
+    st.latex(r"TMI_i = \left( \frac{\text{Número total de óbitos na faixa etária i}}{\text{População total na faixa etária i}} \right) \times 100.000")
+    
+    st.info("💡 **Nota:** Os dados populacionais estão disponíveis apenas para os anos 1980, 1991, 2000 e 2010.")
+    
+    # Selecionar ano para análise
+    ano_selecionado = st.selectbox("Selecione o ano para análise:", sorted(tmi_df['Ano'].unique()))
+    
+    # Filtrar dados
+    tmi_filtrado = tmi_df[tmi_df['Ano'] == ano_selecionado]
+    
+    # Gráfico de TMI por faixa etária
+    st.subheader(f"Taxa de Mortalidade por Idade - {ano_selecionado}")
+    
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Ordem das faixas etárias
+    ordem_faixas = [
+        'Menor 1 ano', '1 a 4 anos', '5 a 9 anos', '10 a 14 anos', 
+        '15 a 19 anos', '20 a 29 anos', '30 a 39 anos', '40 a 49 anos',
+        '50 a 59 anos', '60 a 69 anos', '70 a 79 anos', '80 anos e mais'
+    ]
+    
+    for regiao in tmi_filtrado['Região'].unique():
+        dados_regiao = tmi_filtrado[tmi_filtrado['Região'] == regiao]
+        dados_regiao = dados_regiao.set_index('Faixa_Etaria').reindex(ordem_faixas).reset_index()
+        ax.plot(dados_regiao['Faixa_Etaria'], dados_regiao['TMI'], 
+                marker='o', label=regiao, linewidth=2, markersize=6)
+    
+    ax.set_xlabel('Faixa Etária')
+    ax.set_ylabel('TMI (óbitos por 100.000 habitantes)')
+    ax.set_title(f'Taxa de Mortalidade por Idade - {ano_selecionado}')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
+    
+    # Tabela de TMI
+    st.subheader("Tabela - Taxas de Mortalidade por Idade")
+    tmi_pivot = tmi_filtrado.pivot_table(values='TMI', index='Faixa_Etaria', columns='Região').reindex(ordem_faixas)
+    st.dataframe(tmi_pivot.round(2), use_container_width=True)
+
+# Página: Padronização por Idade
+elif pagina == "Padronização por Idade":
+    st.header("⚖️ Padronização por Idade")
     st.markdown("""
-    Este painel lê três arquivos .csv presentes no mesmo diretório do app:
-    - **Obitos_regiões.csv**: óbitos por região, ano e faixa etária.
-    - **Pop_regiões.csv**: população por região, ano e faixa etária.
-    - **Pop_BR.csv**: população padrão do Brasil por faixa etária.
-
-    Ele calcula:
-    - **CMB** no período selecionado: total de óbitos no período dividido pela população do ponto médio do período, vezes 100.000.
-    - **TMIᵢ** por faixa: óbitos na faixa/ano/região divididos pela população da faixa/ano/região.
-    - **Taxa padronizada direta** por 100.000 usando a população padrão do Brasil (Pop_BR) como pesos.
-    Também gera tabelas descritivas e gráficos de tendência.
+    **Método Direto de Padronização:**
+    - Usa a população padrão do Brasil (2010)
+    - Elimina o efeito das diferenças na estrutura etária
+    - Permite comparação mais justa entre regiões
     """)
+    
+    # Tabela comparativa
+    st.subheader("Comparação: CMB vs Taxa Padronizada")
+    
+    comparativo_df = pd.merge(
+        cmb_df[['Região', 'Ano', 'CMB']],
+        padronizado_df[['Região', 'Ano', 'Taxa_Padronizada']],
+        on=['Região', 'Ano']
+    )
+    
+    st.dataframe(comparativo_df.round(2), use_container_width=True)
+    
+    # Gráfico comparativo
+    st.subheader("Evolução: CMB vs Taxa Padronizada")
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # CMB
+    for regiao in comparativo_df['Região'].unique():
+        dados_regiao = comparativo_df[comparativo_df['Região'] == regiao]
+        ax1.plot(dados_regiao['Ano'], dados_regiao['CMB'], 
+                 marker='o', label=regiao, linewidth=2, markersize=6)
+    
+    ax1.set_xlabel('Ano')
+    ax1.set_ylabel('CMB (óbitos por 100.000 habitantes)')
+    ax1.set_title('Coeficiente de Mortalidade Bruto')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Taxa Padronizada
+    for regiao in comparativo_df['Região'].unique():
+        dados_regiao = comparativo_df[comparativo_df['Região'] == regiao]
+        ax2.plot(dados_regiao['Ano'], dados_regiao['Taxa_Padronizada'], 
+                 marker='s', label=regiao, linewidth=2, markersize=6)
+    
+    ax2.set_xlabel('Ano')
+    ax2.set_ylabel('Taxa Padronizada (óbitos por 100.000 habitantes)')
+    ax2.set_title('Taxa de Mortalidade Padronizada')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Análise de diferenças
+    st.subheader("Análise das Diferenças")
+    
+    comparativo_df['Diferenca'] = comparativo_df['Taxa_Padronizada'] - comparativo_df['CMB']
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Diferenças por Ano:**")
+        for ano in comparativo_df['Ano'].unique():
+            dados_ano = comparativo_df[comparativo_df['Ano'] == ano]
+            st.write(f"**{ano}:**")
+            for _, row in dados_ano.iterrows():
+                st.write(f"{row['Região']}: {row['Diferenca']:.3f}")
+    
+    with col2:
+        st.write("**Interpretação:**")
+        st.write("""
+        - **Diferença positiva:** Estrutura etária mais jovem na região
+        - **Diferença negativa:** Estrutura etária mais envelhecida na região  
+        - **Valores próximos de zero:** Estrutura etária similar à padrão
+        
+        *A padronização remove o efeito da estrutura etária, permitindo comparações mais válidas entre regiões.*
+        """)
 
-# Carregar dados
-try:
-    ob, pr, pb = load_data()
-except Exception as e:
-    st.error(f"Erro ao carregar os CSVs. Verifique se os arquivos existem e se os nomes de colunas são reconhecíveis. Detalhes: {e}")
-    st.stop()
+# Página: Análise de Tendência
+elif pagina == "Análise de Tendência":
+    st.header("📈 Análise de Tendência Temporal")
+    st.markdown("""
+    **Análise de regressão linear** para identificar tendências significativas 
+    na mortalidade por leucemia ao longo do tempo.
+    """)
+    
+    st.info("💡 **Nota:** A análise considera apenas os anos com dados populacionais disponíveis (1980, 1991, 2000, 2010).")
+    
+    # Resultados da análise de tendência
+    st.subheader("Resultados da Regressão Linear")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**🇧🇷 Nordeste**")
+        ne_cmb = tendencia_resultados['Nordeste']['CMB']
+        ne_pad = tendencia_resultados['Nordeste']['Padronizada']
+        
+        st.metric("Tendência CMB", f"{ne_cmb['slope']:.4f} por ano", 
+                 delta=f"{ne_cmb['slope']*10:.2f} por década" if not np.isnan(ne_cmb['slope']) else "N/A")
+        st.metric("R² CMB", f"{ne_cmb['r_squared']:.3f}")
+        st.metric("p-valor CMB", f"{ne_cmb['p_value']:.4f}")
+        
+        st.metric("Tendência Padronizada", f"{ne_pad['slope']:.4f} por ano",
+                 delta=f"{ne_pad['slope']*10:.2f} por década" if not np.isnan(ne_pad['slope']) else "N/A")
+        st.metric("R² Padronizada", f"{ne_pad['r_squared']:.3f}")
+        st.metric("p-valor Padronizada", f"{ne_pad['p_value']:.4f}")
+    
+    with col2:
+        st.write("**🇧🇷 Sudeste**")
+        se_cmb = tendencia_resultados['Sudeste']['CMB']
+        se_pad = tendencia_resultados['Sudeste']['Padronizada']
+        
+        st.metric("Tendência CMB", f"{se_cmb['slope']:.4f} por ano",
+                 delta=f"{se_cmb['slope']*10:.2f} por década" if not np.isnan(se_cmb['slope']) else "N/A")
+        st.metric("R² CMB", f"{se_cmb['r_squared']:.3f}")
+        st.metric("p-valor CMB", f"{se_cmb['p_value']:.4f}")
+        
+        st.metric("Tendência Padronizada", f"{se_pad['slope']:.4f} por ano",
+                 delta=f"{se_pad['slope']*10:.2f} por década" if not np.isnan(se_pad['slope']) else "N/A")
+        st.metric("R² Padronizada", f"{se_pad['r_squared']:.3f}")
+        st.metric("p-valor Padronizada", f"{se_pad['p_value']:.4f}")
+    
+    # Gráficos com linhas de tendência
+    st.subheader("Gráficos com Linhas de Tendência")
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # CMB com tendência
+    for regiao in cmb_df['Região'].unique():
+        dados_regiao = cmb_df[cmb_df['Região'] == regiao].sort_values('Ano')
+        ax1.scatter(dados_regiao['Ano'], dados_regiao['CMB'], 
+                   label=f'{regiao} (dados)', alpha=0.7, s=80)
+        
+        # Linha de tendência
+        tendencia = tendencia_resultados[regiao]['CMB']
+        if not np.isnan(tendencia['slope']):
+            y_pred = tendencia['intercept'] + tendencia['slope'] * dados_regiao['Ano']
+            ax1.plot(dados_regiao['Ano'], y_pred, 
+                     label=f'{regiao} (tendência)', linewidth=2, linestyle='--')
+    
+    ax1.set_xlabel('Ano')
+    ax1.set_ylabel('CMB (óbitos por 100.000 habitantes)')
+    ax1.set_title('Coeficiente de Mortalidade Bruto com Tendência')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Taxas padronizadas com tendência
+    for regiao in padronizado_df['Região'].unique():
+        dados_regiao = padronizado_df[padronizado_df['Região'] == regiao].sort_values('Ano')
+        ax2.scatter(dados_regiao['Ano'], dados_regiao['Taxa_Padronizada'], 
+                   label=f'{regiao} (dados)', alpha=0.7, s=80)
+        
+        # Linha de tendência
+        tendencia = tendencia_resultados[regiao]['Padronizada']
+        if not np.isnan(tendencia['slope']):
+            y_pred = tendencia['intercept'] + tendencia['slope'] * dados_regiao['Ano']
+            ax2.plot(dados_regiao['Ano'], y_pred, 
+                     label=f'{regiao} (tendência)', linewidth=2, linestyle='--')
+    
+    ax2.set_xlabel('Ano')
+    ax2.set_ylabel('Taxa Padronizada (óbitos por 100.000 habitantes)')
+    ax2.set_title('Taxa de Mortalidade Padronizada com Tendência')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Interpretação
+    st.subheader("📋 Interpretação dos Resultados")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("""
+        **Significância estatística (p-valor):**
+        - 🔴 p < 0.05: Tendência estatisticamente significativa
+        - 🟡 p ≥ 0.05: Tendência não significativa
+        
+        **Direção da tendência (coeficiente):**
+        - 📈 Positivo: Aumento na mortalidade ao longo do tempo
+        - 📉 Negativo: Redução na mortalidade ao longo do tempo
+        """)
+    
+    with col2:
+        st.write("""
+        **Força da relação (R²):**
+        - 🟢 0.8-1.0: Forte relação linear
+        - 🟡 0.5-0.8: Relação moderada
+        - 🔴 0.0-0.5: Fraca relação linear
+        
+        **Limitações:**
+        - Poucos pontos temporais (4 anos)
+        - Dados populacionais limitados
+        """)
 
-# Filtros (incluindo faixa etária)
-regioes = sorted(ob["regiao"].dropna().unique().tolist())
-anos_disponiveis = sorted(ob["ano"].dropna().astype(int).unique().tolist())
-col1, col2, col3 = st.columns(3)
-with col1:
-    regs_sel = st.multiselect("Regiões", regioes, default=[r for r in regioes if r.lower() in {"nordeste", "sudeste"}] or regioes[:2])
-with col2:
-    ano_ini, ano_fim = st.select_slider("Período", options=anos_disponiveis, value=(anos_disponiveis[0], anos_disponiveis[-1]))
-with col3:
-    max_breaks = st.slider("Nº máximo de joinpoints", 0, 3, 2, help="Usado na análise de tendência com ruptures.")
-
-anos_sel = [a for a in anos_disponiveis if ano_ini <= a <= ano_fim]
-# Primeiro filtra por região e anos para listar faixas disponíveis
-ob_tmp = ob[ob["regiao"].isin(regs_sel) & ob["ano"].isin(anos_sel)].copy()
-pr_tmp = pr[pr["regiao"].isin(regs_sel) & pr["ano"].isin(anos_sel)].copy()
-faixas_disponiveis = sorted(set(ob_tmp["faixa"].dropna().unique().tolist()) | set(pr_tmp["faixa"].dropna().unique().tolist()))
-faixas_sel = st.multiselect("Faixa etária", faixas_disponiveis, default=faixas_disponiveis)
-
-# Aplica filtros finais (incluindo faixa etária)
-ob_f = ob_tmp[ob_tmp["faixa"].isin(faixas_sel)].copy()
-pr_f = pr_tmp[pr_tmp["faixa"].isin(faixas_sel)].copy()
-
-cmb_all_ages = st.checkbox("Calcular CMB com todas as faixas etárias", value=False, help="Quando marcado, o CMB usa todas as faixas etárias do período, ignorando o filtro de faixa. Útil para comparar o coeficiente bruto clássico com o fatiado por faixa.")
-
-# ====== Descritivo de óbitos ======
-st.subheader("Frequência de óbitos — tabela descritiva")
-desc = ob_f.groupby(["regiao", "ano"], as_index=False)["obitos"].sum().pivot(index="ano", columns="regiao", values="obitos").fillna(0).astype(int)
-st.dataframe(desc, use_container_width=True)
-
-# ====== TMI por faixa ======
-st.subheader("Taxas específicas por faixa etária (TMIᵢ)")
-try:
-    tmi = compute_tmi(ob_f, pr_f)
-    # Mostrar tabela resumida
-    tmi_tbl = tmi.groupby(["regiao", "ano", "faixa"], as_index=False).agg(tmi=("tmi", lambda x: (x.mean()*100000.0))).rename(columns={"tmi": "TMI_i_100k"})
-    st.dataframe(tmi_tbl, use_container_width=True)
-except Exception as e:
-    st.warning(f"Não foi possível calcular TMIᵢ com os filtros atuais. {e}")
-    tmi_tbl = None
-
-# ====== CMB para o período ======
-st.subheader("Coeficiente de Mortalidade Bruto (CMB) por 100.000 habitantes — período selecionado")
-try:
-    if cmb_all_ages:
-        # usa todas as faixas etárias do período selecionado (ignora filtro de faixa)
-        cmb = compute_cmb(ob_tmp, pr_tmp, anos_sel)
-        st.caption("Modo: CMB com **todas as faixas etárias** (ignora filtro de faixa).")
-    else:
-        cmb = compute_cmb(ob_f, pr_f, anos_sel)
-        st.caption("Modo: CMB **restrito às faixas selecionadas**.")
-    st.dataframe(cmb, use_container_width=True)
-except Exception as e:
-    st.warning(f"Não foi possível calcular CMB. {e}")
-    cmb = None
-
-# ====== Padronização direta ======
-st.subheader("Taxa padronizada por idade (método direto) — por 100.000 habitantes")
-try:
-    pad = compute_padronizado_direto(ob_f, pr_f, pb)
-    st.dataframe(pad, use_container_width=True)
-except Exception as e:
-    st.error(f"Erro ao calcular taxas padronizadas. {e}")
-    st.stop()
-
-# ====== Gráficos de tendência ======
-st.subheader("Tendência — taxas brutas vs padronizadas")
-with st.container():
-    colA, colB = st.columns(2)
-    with colA:
-        try:
-            plot_lines(pad, "taxa_bruta_100k", "Taxa bruta por 100.000 ao longo do tempo")
-        except Exception as e:
-            st.warning(f"Falha ao plotar taxa bruta. {e}")
-    with colB:
-        try:
-            plot_lines(pad, "taxa_padronizada_100k", "Taxa padronizada por 100.000 ao longo do tempo")
-        except Exception as e:
-            st.warning(f"Falha ao plotar taxa padronizada. {e}")
-
-# ====== Joinpoint (estimativa de pontos de mudança) ======
-st.subheader("Análise de tendência com Joinpoints (estimados)")
-for reg in regs_sel:
-    sr = pad[pad["regiao"] == reg].copy()
-    if len(sr) < 4:
-        st.info(f"{reg}: poucos pontos no tempo para estimar joinpoints.")
-        continue
-    joinpoint_analysis(sr, "taxa_padronizada_100k", max_breaks=max_breaks)
-
-st.caption("Observação: as estimativas dependem da qualidade e consistência dos dados por faixa etária. Se algum ano ou faixa estiver ausente, os cálculos serão feitos com os cruzamentos disponíveis.")
+# Rodapé
+st.markdown("---")
+st.markdown(
+    "**Desenvolvido para análise epidemiológica de mortalidade por leucemia** | "
+    "Dados: 1979-2022 | Regiões: Nordeste e Sudeste | "
+    "População Padrão: Brasil 2010"
+)
