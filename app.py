@@ -1,587 +1,353 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime
-import io
-import os
+from pathlib import Path
+from typing import Dict, List, Tuple
+from unidecode import unidecode
 
-# Configuração da página
-st.set_page_config(
-    page_title="Análise de Mortalidade por Leucemia - Nordeste x Sudeste",
-    page_icon="📊",
-    layout="wide"
-)
+# ========= CONFIG =========
+st.set_page_config(page_title="Mortalidade por Leucemia - Nordeste x Sudeste", layout="wide")
 
-# Título e introdução
-st.title("📊 Análise de Mortalidade por Leucemia: Nordeste vs Sudeste (1979-2022)")
-st.markdown("""
-**Trabalho de Conclusão de Curso**  
-*Análise dos coeficientes de mortalidade bruta e padronizada por idade*
-""")
+DATA_DIR = Path(".")  # os .csv devem estar no mesmo diretório do app
+FILE_OBITOS = DATA_DIR / "Obitos_regiões.csv"
+FILE_POP_REGIOES = DATA_DIR / "Pop_regiões.csv"
+FILE_POP_BR = DATA_DIR / "Pop_BR.csv"
 
-# ------------------------------
-# Funções auxiliares
-# ------------------------------
+# ========= HELPERS =========
+def norm(s: str) -> str:
+    return unidecode(s).strip().lower().replace("  ", " ").replace("-", " ").replace(".", "").replace("/", " ").replace("\", " ")
 
-@st.cache_data
-def read_csv_safely(file_path):
-    """Lê arquivos CSV com tratamento robusto de encoding e separadores"""
+COLMAP = {
+    "regiao": {"regiao", "região", "uf", "macroregiao", "macrorregiao", "region"},
+    "ano": {"ano", "periodo", "período", "year"},
+    "faixa": {"faixa etaria", "faixa_etaria", "grupo etario", "grupo_etario", "idade", "grupo etario ibge", "grupo_etario_ibge"},
+    "obitos": {"obitos", "óbitos", "obitos leucemia", "obitos_leucemia", "deaths", "obitos total", "obitos_total"},
+    "pop": {"populacao", "população", "population", "pop_total", "pop", "populacao total"},
+    "pop_padrao": {"populacao padrao", "populacao_padrao", "pop padrao", "pop_padrao", "padrao", "standard population", "populacao brasil", "pop_br"},
+}
+
+def auto_map_columns(df: pd.DataFrame, required: List[str]) -> Dict[str, str]:
+    """Tenta mapear nomes de colunas do df para chaves lógicas em 'required'."""
+    candidates = {k: {norm(x) for x in v} for k, v in COLMAP.items()}
+    normalized_cols = {norm(c): c for c in df.columns}
+    mapping = {}
+    for need in required:
+        found = None
+        for col_norm, original in normalized_cols.items():
+            if need in candidates:
+                if (col_norm in candidates[need]) or (need == col_norm):
+                    found = original
+                    break
+        # fallback por similaridade simples
+        if not found:
+            for col_norm, original in normalized_cols.items():
+                if any(token in col_norm for token in candidates.get(need, [])):
+                    found = original
+                    break
+        if not found:
+            # tentativa por início/contém
+            for col_norm, original in normalized_cols.items():
+                if need in col_norm or col_norm in candidates.get(need, set()):
+                    found = original
+                    break
+        if not found:
+            raise ValueError(f"Não foi possível identificar a coluna para '{need}'. Colunas disponíveis: {list(df.columns)}")
+        mapping[need] = found
+    return mapping
+
+def read_csv_smart(path: Path) -> pd.DataFrame:
+    # tenta encoding comum
+    for enc in ["utf-8", "latin1", "cp1252"]:
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except Exception:
+            continue
+    # fallback ao pandas default
+    return pd.read_csv(path)
+
+@st.cache_data(show_spinner=False)
+def load_data():
+    ob = read_csv_smart(FILE_OBITOS)
+    pr = read_csv_smart(FILE_POP_REGIOES)
+    pb = read_csv_smart(FILE_POP_BR)
+
+    # mapear colunas
+    map_ob = auto_map_columns(ob, ["regiao", "ano", "faixa", "obitos"])
+    map_pr = auto_map_columns(pr, ["regiao", "ano", "faixa", "pop"])
+    # População padrão pode ter apenas faixa e população (sem ano)
     try:
-        # Tentar diferentes encodings e separadores
-        encodings = ['utf-8', 'latin-1', 'windows-1252', 'iso-8859-1']
-        separators = [';', ',']
-        
-        for encoding in encodings:
-            for separator in separators:
-                try:
-                    df = pd.read_csv(file_path, sep=separator, encoding=encoding)
-                    if not df.empty:
-                        st.success(f"Arquivo lido com encoding: {encoding}, separador: '{separator}'")
-                        return df
-                except:
-                    continue
-        
-        # Última tentativa com parâmetros padrão
-        return pd.read_csv(file_path)
+        map_pb = auto_map_columns(pb, ["faixa", "pop"])
+        pb = pb.rename(columns={map_pb["faixa"]: "faixa", map_pb["pop"]: "pop_padrao"})
+    except Exception:
+        # pode vir com nome já explícito
+        map_pb = auto_map_columns(pb, ["faixa", "pop_padrao"])
+        pb = pb.rename(columns={map_pb["faixa"]: "faixa", map_pb["pop_padrao"]: "pop_padrao"})
+
+    # renomeia obitos e pop_regioes
+    ob = ob.rename(columns={map_ob["regiao"]: "regiao", map_ob["ano"]: "ano", map_ob["faixa"]: "faixa", map_ob["obitos"]: "obitos"})
+    pr = pr.rename(columns={map_pr["regiao"]: "regiao", map_pr["ano"]: "ano", map_pr["faixa"]: "faixa", map_pr["pop"]: "pop"})
+
+    # normalizações
+    for df in [ob, pr, pb]:
+        if "regiao" in df.columns:
+            df["regiao"] = df["regiao"].astype(str).str.strip()
+        if "faixa" in df.columns:
+            df["faixa"] = df["faixa"].astype(str).str.strip()
+        if "ano" in df.columns:
+            df["ano"] = pd.to_numeric(df["ano"], errors="coerce").astype("Int64")
+
+    # padroniza categorias de faixa etária (remove espaços duplicados)
+    for df in [ob, pr, pb]:
+        if "faixa" in df.columns:
+            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True)
+
+    # Se Pop_BR tiver anos, agrega por faixa
+    if "ano" in pb.columns:
+        pb = pb.groupby("faixa", as_index=False)["pop_padrao"].sum()
+
+    return ob, pr, pb
+
+def ensure_midpoint_population(pr: pd.DataFrame, regiao: str, anos: List[int]) -> Tuple[int, pd.DataFrame]:
+    """Retorna o ano do ponto médio e a tabela de população daquele ano por faixa para a região, com possível interpolação."""
+    anos_validos = sorted([int(a) for a in anos if pd.notnull(a)])
+    if not anos_validos:
+        raise ValueError("Não há anos válidos no filtro.")
+    mid = int(round(np.mean(anos_validos)))
+    # populações disponíveis para a região
+    pr_r = pr.loc[pr["regiao"] == regiao].copy()
+    anos_reg = sorted(pr_r["ano"].dropna().astype(int).unique())
+    if mid in anos_reg:
+        base = pr_r.loc[pr_r["ano"] == mid, ["faixa", "pop"]].copy()
+        base["ano"] = mid
+        return mid, base
+    # interpolação simples por faixa etária
+    def interp_for_group(g):
+        g = g.sort_values("ano")
+        return np.interp(mid, g["ano"], g["pop"])
+    est = pr_r.groupby("faixa").apply(interp_for_group).rename("pop").reset_index()
+    est["ano"] = mid
+    return mid, est[["faixa", "pop", "ano"]]
+
+def compute_tmi(ob: pd.DataFrame, pr: pd.DataFrame) -> pd.DataFrame:
+    """TMI_i por regiao, ano e faixa = obitos / pop (no mesmo ano)."""
+    m = pd.merge(ob, pr, on=["regiao", "ano", "faixa"], how="inner")
+    m["tmi"] = m["obitos"] / m["pop"]
+    return m
+
+def compute_cmb(ob: pd.DataFrame, pr: pd.DataFrame, anos_sel: List[int]) -> pd.DataFrame:
+    """CMB por regiao e ano_ponto_medio do período selecionado."""
+    out_rows = []
+    for reg in sorted(ob["regiao"].unique()):
+        anos_reg = sorted(ob.loc[ob["regiao"] == reg, "ano"].dropna().astype(int).unique())
+        anos_periodo = [a for a in anos_sel if a in anos_reg]
+        if not anos_periodo:
+            continue
+        mid, pop_mid = ensure_midpoint_population(pr, reg, anos_periodo)
+        # total de óbitos no período
+        total_obitos = ob.loc[(ob["regiao"] == reg) & (ob["ano"].isin(anos_periodo)), "obitos"].sum()
+        # população total no ponto médio (somar sobre faixas)
+        pop_total_mid = pop_mid["pop"].sum()
+        cmb = (total_obitos / pop_total_mid) * 100000.0 if pop_total_mid > 0 else np.nan
+        out_rows.append({"regiao": reg, "periodo_ini": min(anos_periodo), "periodo_fim": max(anos_periodo), "ano_ponto_medio": mid, "obitos_periodo": int(total_obitos), "pop_ponto_medio": float(pop_total_mid), "CMB_100k": float(cmb)})
+    return pd.DataFrame(out_rows)
+
+def compute_padronizado_direto(ob: pd.DataFrame, pr: pd.DataFrame, pb: pd.DataFrame) -> pd.DataFrame:
+    """Taxa padronizada direta por regiao e ano usando Pop_BR como padrão.
+    Resultado expresso por 100.000 habitantes.
+    """
+    # pesos da população padrão
+    pb_use = pb.copy()
+    total_padrao = pb_use["pop_padrao"].sum()
+    pb_use["peso"] = pb_use["pop_padrao"] / total_padrao
+
+    # unir óbitos, população regional e pesos por faixa
+    m = pd.merge(ob, pr, on=["regiao", "ano", "faixa"], how="inner")
+    m = pd.merge(m, pb_use[["faixa", "peso"]], on="faixa", how="inner")
+    # taxa específica por faixa
+    m["tmi"] = m["obitos"] / m["pop"]
+    # taxa padronizada (soma das taxas específicas ponderadas pelos pesos)
+    pad = m.groupby(["regiao", "ano"], as_index=False).apply(lambda g: pd.Series({
+        "taxa_padronizada_100k": float((g["tmi"] * g["peso"]).sum() * 100000.0),
+        "taxa_bruta_100k": float((g["obitos"].sum() / g["pop"].sum()) * 100000.0 if g["pop"].sum() > 0 else np.nan),
+        "obitos": int(g["obitos"].sum()),
+        "pop": float(g["pop"].sum())
+    })).reset_index().drop(columns=["level_2"], errors="ignore")
+    return pad
+
+def plot_lines(df: pd.DataFrame, y: str, title: str):
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for reg, g in df.sort_values("ano").groupby("regiao"):
+        ax.plot(g["ano"], g[y], marker="o", label=reg)
+    ax.set_xlabel("Ano")
+    ax.set_ylabel(y.replace("_", " "))
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+def try_import_ruptures():
+    try:
+        import ruptures as rpt
+        return rpt
     except Exception as e:
-        st.error(f"Erro ao ler arquivo {file_path}: {str(e)}")
-        return pd.DataFrame()
-
-def detect_column_names(df):
-    """Detecta e corrige nomes de colunas com caracteres especiais"""
-    if df.empty:
-        return df
-    
-    # Mapeamento de correção para os caracteres problemáticos
-    correction_map = {
-        'RegiaÞo': 'Regiao',
-        'Regiaﬁo': 'Regiao', 
-        'ClassificaÁaﬁo': 'Classificacao',
-        'ClassificaçaÞo': 'Classificacao'
-    }
-    
-    # Renomear colunas
-    new_columns = []
-    for col in df.columns:
-        if col in correction_map:
-            new_columns.append(correction_map[col])
-        else:
-            new_columns.append(col)
-    
-    df.columns = new_columns
-    return df
-
-def transform_to_long_format(df, value_name):
-    """Transforma dados do formato wide para long"""
-    # Identificar colunas de metadados
-    meta_columns = ['Regiao', 'Classificacao', 'Ano', 'Total', 'Idade ignorada']
-    available_meta = [col for col in meta_columns if col in df.columns]
-    
-    # Colunas de faixa etária são as que não são metadados
-    age_columns = [col for col in df.columns if col not in available_meta]
-    
-    # Usar colunas disponíveis
-    id_cols = [col for col in available_meta if col in ['Regiao', 'Ano']]
-    
-    df_long = pd.melt(
-        df,
-        id_vars=id_cols,
-        value_vars=age_columns,
-        var_name='FaixaEtaria',
-        value_name=value_name
-    )
-    
-    df_long[value_name] = pd.to_numeric(df_long[value_name], errors='coerce').fillna(0)
-    df_long['Ano'] = pd.to_numeric(df_long['Ano'], errors='coerce').astype(int)
-    
-    return df_long
-
-def harmonize_age_groups(faixa_etaria):
-    """Padroniza as faixas etárias"""
-    if pd.isna(faixa_etaria):
         return None
-        
-    faixa = str(faixa_etaria).strip().lower()
-    
-    mapping = {
-        'menor 1 ano': '0-1',
-        '1 a 4 anos': '1-4', 
-        '5 a 9 anos': '5-9',
-        '10 a 14 anos': '10-14',
-        '15 a 19 anos': '15-19',
-        '20 a 29 anos': '20-29',
-        '30 a 39 anos': '30-39',
-        '40 a 49 anos': '40-49',
-        '50 a 59 anos': '50-59',
-        '60 a 69 anos': '60-69',
-        '70 a 79 anos': '70-79',
-        '80 anos e mais': '80+',
-        '80 anos e mais': '80+',
-        'total': 'Total',
-        'idade ignorada': 'Ignorada'
-    }
-    
-    return mapping.get(faixa, faixa)
 
-# População padrão OMS
-OMS_STD_POP = pd.DataFrame({
-    'FaixaEtaria': ['0-4', '5-9', '10-14', '15-19', '20-24', '25-29', '30-34', '35-39', 
-                   '40-44', '45-49', '50-54', '55-59', '60-64', '65-69', '70-74', '75-79', '80+'],
-    'PopulacaoPadrao': [8800, 8700, 8600, 8500, 8000, 7500, 7000, 6500, 
-                       6000, 5500, 5000, 4000, 2500, 1500, 800, 200, 100]
-})
+def joinpoint_analysis(series_df: pd.DataFrame, y: str, max_breaks: int = 2):
+    """Estimativa de pontos de mudança com 'ruptures' e ajuste linear por trechos."""
+    rpt = try_import_ruptures()
+    if rpt is None:
+        st.info("Para a análise de Joinpoint, instale o pacote 'ruptures'. Mostrando apenas a série temporal.")
+        plot_lines(series_df, y, f"Tendência de {y}")
+        return
 
-def map_to_std_age_groups(faixa_original, valor, tipo):
-    """Mapeia faixas etárias para o padrão OMS com distribuição proporcional"""
-    faixa = harmonize_age_groups(faixa_original)
-    
-    if faixa == '0-1':
-        return [('0-4', valor * 0.2)]
-    elif faixa == '1-4':
-        return [('0-4', valor * 0.8)]
-    elif faixa == '20-29':
-        return [('20-24', valor * 0.5), ('25-29', valor * 0.5)]
-    elif faixa == '30-39':
-        return [('30-34', valor * 0.5), ('35-39', valor * 0.5)]
-    elif faixa == '40-49':
-        return [('40-44', valor * 0.5), ('45-49', valor * 0.5)]
-    elif faixa == '50-59':
-        return [('50-54', valor * 0.5), ('55-59', valor * 0.5)]
-    elif faixa == '60-69':
-        return [('60-64', valor * 0.5), ('65-69', valor * 0.5)]
-    elif faixa == '70-79':
-        return [('70-74', valor * 0.5), ('75-79', valor * 0.5)]
-    elif faixa in OMS_STD_POP['FaixaEtaria'].values:
-        return [(faixa, valor)]
-    else:
-        return []
+    s = series_df.sort_values("ano").copy()
+    x = s["ano"].to_numpy().reshape(-1, 1).astype(float)
+    yv = s[y].to_numpy().astype(float)
+    algo = rpt.KernelCPD(kernel="linear").fit(np.column_stack([x.flatten(), yv]))
+    n_bkps = min(max_breaks, max(1, len(s)//4))  # limite razoável
+    # tenta estimativas de 0..max_breaks e escolhe por penalidade BIC simples
+    best_bkps, best_pen = None, np.inf
+    for nb in range(0, n_bkps + 1):
+        try:
+            bkps = algo.predict(n_bkps=nb)
+        except Exception:
+            continue
+        # bkps são índices de fim de segmento; computar SSE básico
+        prev = 0
+        sse = 0.0
+        for b in bkps:
+            xi = x[prev:b].flatten()
+            yi = yv[prev:b]
+            if len(xi) >= 2:
+                A = np.vstack([xi, np.ones_like(xi)]).T
+                m, c = np.linalg.lstsq(A, yi, rcond=None)[0]
+                yhat = m*xi + c
+                sse += float(((yi - yhat) ** 2).sum())
+            prev = b
+        k_params = 2*(len(bkps))  # inclinação e intercepto por segmento aproximado
+        n = len(yv)
+        bic = n*np.log(sse/n if n>0 and sse>0 else 1.0) + k_params*np.log(n if n>0 else 1.0)
+        if bic < best_pen:
+            best_pen, best_bkps = bic, bkps
 
-def calcular_cmb(obitos, populacao):
-    """Calcula Coeficiente de Mortalidade Bruto"""
-    if populacao > 0:
-        return (obitos / populacao) * 100000
-    return 0
+    # plot
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(s["ano"], yv, marker="o")
+    if best_bkps is not None:
+        prev = 0
+        for b in best_bkps:
+            xi = x[prev:b].flatten()
+            yi = yv[prev:b]
+            if len(xi) >= 2:
+                A = np.vstack([xi, np.ones_like(xi)]).T
+                m, c = np.linalg.lstsq(A, yi, rcond=None)[0]
+                ax.plot(xi, m*xi + c, linewidth=2)
+            if b < len(s):
+                ax.axvline(s.iloc[b-1]["ano"], linestyle="--", alpha=0.5)
+            prev = b
+    ax.set_title(f"Tendência com Joinpoints estimados para {series_df['regiao'].iloc[0]}")
+    ax.set_xlabel("Ano")
+    ax.set_ylabel(y.replace("_", " "))
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
 
-def processar_dados_para_analise(obitos_long, populacao_long):
-    """Processa os dados para cálculo de CMB e CMP"""
-    
-    # Calcular totais anuais para CMB
-    obitos_totais = obitos_long.groupby(['Regiao', 'Ano'])['Obitos'].sum().reset_index()
-    populacao_totais = populacao_long.groupby(['Regiao', 'Ano'])['Populacao'].sum().reset_index()
-    
-    # Calcular CMB
-    cmb_df = pd.merge(obitos_totais, populacao_totais, on=['Regiao', 'Ano'])
-    cmb_df['CMB'] = cmb_df.apply(lambda x: calcular_cmb(x['Obitos'], x['Populacao']), axis=1)
-    
-    # Preparar dados para CMP
-    cmp_data = []
-    
-    for regiao in obitos_long['Regiao'].unique():
-        for ano in obitos_long['Ano'].unique():
-            # Obter dados da região e ano
-            obitos_regiao = obitos_long[(obitos_long['Regiao'] == regiao) & (obitos_long['Ano'] == ano)]
-            pop_regiao = populacao_long[(populacao_long['Regiao'] == regiao) & (populacao_long['Ano'] == ano)]
-            
-            # Processar cada faixa etária
-            obitos_std = []
-            pop_std = []
-            
-            for _, row in obitos_regiao.iterrows():
-                mappings = map_to_std_age_groups(row['FaixaEtaria'], row['Obitos'], 'obitos')
-                for faixa_std, valor in mappings:
-                    obitos_std.append({'FaixaEtaria': faixa_std, 'Obitos': valor})
-            
-            for _, row in pop_regiao.iterrows():
-                mappings = map_to_std_age_groups(row['FaixaEtaria'], row['Populacao'], 'populacao')
-                for faixa_std, valor in mappings:
-                    pop_std.append({'FaixaEtaria': faixa_std, 'Populacao': valor})
-            
-            # Agrupar por faixa etária padrão
-            if obitos_std and pop_std:
-                obitos_std_df = pd.DataFrame(obitos_std).groupby('FaixaEtaria')['Obitos'].sum().reset_index()
-                pop_std_df = pd.DataFrame(pop_std).groupby('FaixaEtaria')['Populacao'].sum().reset_index()
-                
-                # Juntar com população padrão
-                merged = pd.merge(obitos_std_df, pop_std_df, on='FaixaEtaria', how='outer').fillna(0)
-                merged = pd.merge(merged, OMS_STD_POP, on='FaixaEtaria', how='inner')
-                
-                if not merged.empty and merged['PopulacaoPadrao'].sum() > 0:
-                    # Calcular CMP
-                    merged['TaxaEspecifica'] = merged['Obitos'] / merged['Populacao']
-                    merged['TaxaEspecifica'] = merged['TaxaEspecifica'].replace([np.inf, -np.inf], 0).fillna(0)
-                    
-                    cmp_val = (merged['TaxaEspecifica'] * merged['PopulacaoPadrao']).sum() / merged['PopulacaoPadrao'].sum() * 100000
-                    
-                    cmp_data.append({
-                        'Regiao': regiao,
-                        'Ano': ano,
-                        'CMP': cmp_val
-                    })
-    
-    cmp_df = pd.DataFrame(cmp_data)
-    
-    # Combinar resultados
-    resultados = pd.merge(cmb_df, cmp_df, on=['Regiao', 'Ano'], how='left')
-    
-    return resultados, obitos_long, populacao_long
+# ========= UI =========
+st.title("Painel: Mortalidade por Leucemia — Nordeste x Sudeste")
 
-# ------------------------------
-# Carregamento Automático dos Arquivos
-# ------------------------------
-
-def carregar_arquivos_automaticamente():
-    """Carrega automaticamente os arquivos do repositório"""
-    arquivos_encontrados = {}
-    
-    # Procurar por arquivos CSV no diretório
-    arquivos_csv = [f for f in os.listdir('.') if f.endswith('.csv')]
-    
-    st.sidebar.info(f"Arquivos CSV encontrados: {arquivos_csv}")
-    
-    # Procurar por arquivos específicos
-    possiveis_nomes_obitos = [
-        'Dados de Obitos.csv', 'Dados de Óbitos.csv', 'obitos.csv', 
-        'dados_obitos.csv', 'mortalidade.csv'
-    ]
-    
-    possiveis_nomes_populacao = [
-        'Dados de População.csv', 'Dados de Populacao.csv', 'populacao.csv',
-        'dados_populacao.csv', 'populacao.csv'
-    ]
-    
-    # Tentar encontrar arquivo de óbitos
-    for nome in possiveis_nomes_obitos:
-        if os.path.exists(nome):
-            arquivos_encontrados['obitos'] = nome
-            break
-    else:
-        # Se não encontrou pelos nomes específicos, usar o primeiro CSV
-        if arquivos_csv:
-            arquivos_encontrados['obitos'] = arquivos_csv[0]
-    
-    # Tentar encontrar arquivo de população
-    for nome in possiveis_nomes_populacao:
-        if os.path.exists(nome):
-            arquivos_encontrados['populacao'] = nome
-            break
-    else:
-        # Se não encontrou pelos nomes específicos, usar o segundo CSV
-        if len(arquivos_csv) > 1:
-            arquivos_encontrados['populacao'] = arquivos_csv[1]
-    
-    return arquivos_encontrados
-
-# ------------------------------
-# Interface Principal
-# ------------------------------
-
-st.sidebar.header("📁 Configuração dos Dados")
-
-# Verificar se existem arquivos no repositório
-arquivos = carregar_arquivos_automaticamente()
-
-if arquivos.get('obitos') and arquivos.get('populacao'):
-    st.sidebar.success("✅ Arquivos encontrados automaticamente!")
-    st.sidebar.write(f"**Óbitos:** {arquivos['obitos']}")
-    st.sidebar.write(f"**População:** {arquivos['populacao']}")
-    
-    use_auto = st.sidebar.checkbox("Usar arquivos automáticos", value=True)
-else:
-    st.sidebar.warning("⚠️ Arquivos não encontrados automaticamente")
-    use_auto = False
-
-if use_auto and arquivos.get('obitos') and arquivos.get('populacao'):
-    # Usar arquivos automáticos
-    df_obitos = read_csv_safely(arquivos['obitos'])
-    df_populacao = read_csv_safely(arquivos['populacao'])
-else:
-    # Upload manual
-    st.sidebar.header("📤 Upload Manual")
-    uploaded_obitos = st.sidebar.file_uploader("Dados de Óbitos por Leucemia", type=['csv'], key='obitos')
-    uploaded_populacao = st.sidebar.file_uploader("Dados de População", type=['csv'], key='populacao')
-    
-    if uploaded_obitos and uploaded_populacao:
-        df_obitos = read_csv_safely(uploaded_obitos)
-        df_populacao = read_csv_safely(uploaded_populacao)
-    else:
-        df_obitos = pd.DataFrame()
-        df_populacao = pd.DataFrame()
-
-# ------------------------------
-# Filtros na Sidebar
-# ------------------------------
-
-if not df_obitos.empty and not df_populacao.empty:
-    st.sidebar.header("⚙️ Filtros de Análise")
-    
-    # Processar dados para obter anos disponíveis
-    with st.spinner("Preparando dados para filtros..."):
-        df_obitos_corr = detect_column_names(df_obitos)
-        df_populacao_corr = detect_column_names(df_populacao)
-        
-        obitos_long = transform_to_long_format(df_obitos_corr, 'Obitos')
-        populacao_long = transform_to_long_format(df_populacao_corr, 'Populacao')
-        
-        # Obter anos disponíveis
-        anos_obitos = sorted(obitos_long['Ano'].unique())
-        anos_populacao = sorted(populacao_long['Ano'].unique())
-        anos_disponiveis = sorted(list(set(anos_obitos) & set(anos_populacao)))
-    
-    if anos_disponiveis:
-        # Filtro de anos com multiselect
-        st.sidebar.subheader("Seleção de Anos")
-        anos_selecionados = st.sidebar.multiselect(
-            "Selecione os anos para análise:",
-            options=anos_disponiveis,
-            default=anos_disponiveis  # Todos selecionados por padrão
-        )
-        
-        # Filtro de período com slider
-        st.sidebar.subheader("Período de Análise")
-        ano_min = min(anos_disponiveis)
-        ano_max = max(anos_disponiveis)
-        
-        periodo = st.sidebar.slider(
-            "Selecione o período:",
-            min_value=ano_min,
-            max_value=ano_max,
-            value=(ano_min, ano_max),
-            step=1
-        )
-        
-        # Filtro de regiões
-        st.sidebar.subheader("Seleção de Regiões")
-        regioes_disponiveis = sorted(obitos_long['Regiao'].unique())
-        regioes_selecionadas = st.sidebar.multiselect(
-            "Selecione as regiões:",
-            options=regioes_disponiveis,
-            default=regioes_disponiveis
-        )
-        
-        # Aplicar filtros
-        aplicar_filtros = st.sidebar.button("Aplicar Filtros")
-        
-        if aplicar_filtros or not anos_selecionados:
-            # Usar período do slider se nenhum ano específico foi selecionado
-            if not anos_selecionados:
-                anos_selecionados = [ano for ano in anos_disponiveis if periodo[0] <= ano <= periodo[1]]
-            
-            # Filtrar dados
-            obitos_filtrado = obitos_long[
-                (obitos_long['Ano'].isin(anos_selecionados)) & 
-                (obitos_long['Regiao'].isin(regioes_selecionadas))
-            ]
-            
-            populacao_filtrado = populacao_long[
-                (populacao_long['Ano'].isin(anos_selecionados)) & 
-                (populacao_long['Regiao'].isin(regioes_selecionadas))
-            ]
-            
-            # Processar análise com dados filtrados
-            with st.spinner("Processando análise com filtros aplicados..."):
-                resultados, obitos_final, populacao_final = processar_dados_para_analise(obitos_filtrado, populacao_filtrado)
-            
-            if not resultados.empty:
-                st.success(f"✅ Análise filtrada: {len(anos_selecionados)} anos, {len(regioes_selecionadas)} regiões")
-                
-                # ------------------------------
-                # ANÁLISE E VISUALIZAÇÕES
-                # ------------------------------
-                
-                st.header("📈 Análise de Resultados")
-                
-                # Resumo Executivo
-                st.subheader("Resumo Executivo")
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    total_obitos = resultados['Obitos'].sum()
-                    st.metric("Total de Óbitos", f"{total_obitos:,.0f}".replace(",", "."))
-                
-                with col2:
-                    avg_cmb = resultados['CMB'].mean()
-                    st.metric("CMB Médio", f"{avg_cmb:.2f}")
-                
-                with col3:
-                    avg_cmp = resultados['CMP'].mean()
-                    st.metric("CMP Médio", f"{avg_cmp:.2f}")
-                
-                with col4:
-                    anos_analisados = resultados['Ano'].nunique()
-                    st.metric("Anos Analisados", anos_analisados)
-                
-                # Informações do Filtro
-                st.info(f"""
-                **Filtros Aplicados:**
-                - Período: {min(anos_selecionados)} - {max(anos_selecionados)}
-                - Regiões: {', '.join(regioes_selecionadas)}
-                - Total de anos: {len(anos_selecionados)}
-                """)
-                
-                # Gráficos de Evolução Temporal
-                st.subheader("Evolução Temporal dos Coeficientes")
-                
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-                
-                # CMB
-                for regiao in resultados['Regiao'].unique():
-                    dados = resultados[resultados['Regiao'] == regiao]
-                    ax1.plot(dados['Ano'], dados['CMB'], marker='o', label=regiao, linewidth=2)
-                
-                ax1.set_title('Coeficiente de Mortalidade Bruto (CMB)', fontsize=14, fontweight='bold')
-                ax1.set_ylabel('CMB (óbitos/100.000 hab.)')
-                ax1.legend()
-                ax1.grid(True, alpha=0.3)
-                
-                # CMP
-                for regiao in resultados['Regiao'].unique():
-                    dados = resultados[resultados['Regiao'] == regiao]
-                    ax2.plot(dados['Ano'], dados['CMP'], marker='s', label=regiao, linewidth=2)
-                
-                ax2.set_title('Coeficiente de Mortalidade Padronizado (CMP)', fontsize=14, fontweight='bold')
-                ax2.set_ylabel('CMP (óbitos/100.000 hab.)')
-                ax2.set_xlabel('Ano')
-                ax2.legend()
-                ax2.grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                st.pyplot(fig)
-                
-                # Tabela de Resultados
-                st.subheader("Tabela de Resultados")
-                st.dataframe(resultados, use_container_width=True)
-                
-                # Análise por Faixa Etária
-                st.subheader("Análise por Faixa Etária")
-                
-                # Distribuição de óbitos
-                dist_obitos = obitos_final.groupby(['Regiao', 'FaixaEtaria'])['Obitos'].sum().reset_index()
-                dist_obitos['Percentual'] = dist_obitos.groupby('Regiao')['Obitos'].transform(
-                    lambda x: x / x.sum() * 100
-                )
-                
-                fig, ax = plt.subplots(figsize=(12, 6))
-                sns.barplot(data=dist_obitos, x='FaixaEtaria', y='Percentual', hue='Regiao', ax=ax)
-                ax.set_title('Distribuição de Óbitos por Faixa Etária', fontweight='bold')
-                ax.set_xlabel('Faixa Etária')
-                ax.set_ylabel('Percentual (%)')
-                plt.xticks(rotation=45)
-                plt.tight_layout()
-                st.pyplot(fig)
-                
-                # ------------------------------
-                # EXPORTAÇÃO E RELATÓRIO
-                # ------------------------------
-                
-                st.header("📤 Exportação de Resultados")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Download dos dados processados
-                    csv = resultados.to_csv(index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="📥 Baixar Dados Processados (CSV)",
-                        data=csv,
-                        file_name="dados_mortalidade_leucemia.csv",
-                        mime="text/csv"
-                    )
-                
-                with col2:
-                    # Relatório resumido
-                    relatorio = f"""
-RELATÓRIO DE ANÁLISE - MORTALIDADE POR LEUCEMIA
-Data de geração: {datetime.now().strftime('%d/%m/%Y %H:%M')}
-
-FILTROS APLICADOS:
-- Período: {min(anos_selecionados)} - {max(anos_selecionados)}
-- Regiões: {', '.join(regioes_selecionadas)}
-- Anos analisados: {len(anos_selecionados)}
-
-RESUMO ESTATÍSTICO:
-- Total de óbitos analisados: {total_obitos:,}
-- CMB médio: {avg_cmb:.2f} óbitos/100.000 hab.
-- CMP médio: {avg_cmp:.2f} óbitos/100.000 hab.
-
-METODOLOGIA:
-- Coeficiente de Mortalidade Bruto (CMB): (Óbitos / População) × 100.000
-- Coeficiente de Mortalidade Padronizado (CMP): Método direto com população padrão OMS
-- População padrão: OMS World Standard Population 2000-2025
-                    """
-                    
-                    st.download_button(
-                        label="📄 Baixar Relatório (TXT)",
-                        data=relatorio,
-                        file_name="relatorio_analise.txt",
-                        mime="text/plain"
-                    )
-                
-                # ------------------------------
-                # CONSIDERAÇÕES ÉTICAS
-                # ------------------------------
-                
-                st.header("🔬 Considerações Éticas e Metodológicas")
-                
-                with st.expander("Aspectos Éticos"):
-                    st.markdown("""
-                    **Conforme Resolução CNS nº 510/2016:**
-                    - Trata-se de **dados públicos e anonimizados**
-                    - Dados em formato agregado, sem possibilidade de identificação individual
-                    - Dispensa submissão a Comitê de Ética em Pesquisa
-                    
-                    **Fontes dos Dados:**
-                    - Sistemas de informação em saúde oficiais
-                    - Dados censitários do IBGE
-                    - Bases públicas do Ministério da Saúde
-                    """)
-                
-                with st.expander("Limitações Metodológicas"):
-                    st.markdown("""
-                    **Considerações Importantes:**
-                    - População disponível apenas para anos censitários
-                    - Necessidade de interpolação para anos intercensitários
-                    - Subnotificação pode variar entre regiões e períodos
-                    - Mudanças na classificação de causas de óbito (CID-9 para CID-10)
-                    """)
-            
-            else:
-                st.error("Não foi possível processar os dados com os filtros selecionados.")
-    
-    else:
-        st.error("Não há anos comuns entre os datasets de óbitos e população.")
-
-else:
-    st.info("👆 Configure os dados na sidebar para iniciar a análise")
-    
-    # Instruções
+with st.expander("Sobre os dados e método"):
     st.markdown("""
-    ### 📝 Instruções para Uso:
-    
-    1. **Configuração dos Dados:**
-       - O sistema tentará encontrar automaticamente os arquivos no repositório
-       - Se não encontrar, use o upload manual na sidebar
-    
-    2. **Aplicar Filtros:**
-       - Selecione os anos desejados na sidebar
-       - Escolha as regiões para análise
-       - Clique em "Aplicar Filtros"
-    
-    3. **A análise incluirá:**
-       - Cálculo do Coeficiente de Mortalidade Bruto (CMB)
-       - Padronização por idade (CMP) usando população OMS
-       - Gráficos de evolução temporal
-       - Análise por faixa etária
-       - Estatísticas descritivas
+    Este painel lê três arquivos .csv presentes no mesmo diretório do app:
+    - **Obitos_regiões.csv**: óbitos por região, ano e faixa etária.
+    - **Pop_regiões.csv**: população por região, ano e faixa etária.
+    - **Pop_BR.csv**: população padrão do Brasil por faixa etária.
+
+    Ele calcula:
+    - **CMB** no período selecionado: total de óbitos no período dividido pela população do ponto médio do período, vezes 100.000.
+    - **TMIᵢ** por faixa: óbitos na faixa/ano/região divididos pela população da faixa/ano/região.
+    - **Taxa padronizada direta** por 100.000 usando a população padrão do Brasil (Pop_BR) como pesos.
+    Também gera tabelas descritivas e gráficos de tendência.
     """)
 
-# Rodapé
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>"
-    "Trabalho de Conclusão de Curso - Análise de Mortalidade por Leucemia | "
-    "Desenvolvido com Streamlit"
-    "</div>",
-    unsafe_allow_html=True
-)
+# Carregar dados
+try:
+    ob, pr, pb = load_data()
+except Exception as e:
+    st.error(f"Erro ao carregar os CSVs. Verifique se os arquivos existem e se os nomes de colunas são reconhecíveis. Detalhes: {e}")
+    st.stop()
+
+# Filtros
+regioes = sorted(ob["regiao"].dropna().unique().tolist())
+anos_disponiveis = sorted(ob["ano"].dropna().astype(int).unique().tolist())
+col1, col2, col3 = st.columns(3)
+with col1:
+    regs_sel = st.multiselect("Regiões", regioes, default=[r for r in regioes if r.lower() in {"nordeste", "sudeste"}] or regioes[:2])
+with col2:
+    ano_ini, ano_fim = st.select_slider("Período", options=anos_disponiveis, value=(anos_disponiveis[0], anos_disponiveis[-1]))
+with col3:
+    max_breaks = st.slider("Nº máximo de joinpoints", 0, 3, 2, help="Usado na análise de tendência com ruptures.")
+
+anos_sel = [a for a in anos_disponiveis if ano_ini <= a <= ano_fim]
+ob_f = ob[ob["regiao"].isin(regs_sel) & ob["ano"].isin(anos_sel)].copy()
+pr_f = pr[pr["regiao"].isin(regs_sel) & pr["ano"].isin(anos_sel)].copy()
+
+# ====== Descritivo de óbitos ======
+st.subheader("Frequência de óbitos — tabela descritiva")
+desc = ob_f.groupby(["regiao", "ano"], as_index=False)["obitos"].sum().pivot(index="ano", columns="regiao", values="obitos").fillna(0).astype(int)
+st.dataframe(desc, use_container_width=True)
+
+# ====== TMI por faixa ======
+st.subheader("Taxas específicas por faixa etária (TMIᵢ)")
+try:
+    tmi = compute_tmi(ob_f, pr_f)
+    # Mostrar tabela resumida
+    tmi_tbl = tmi.groupby(["regiao", "ano", "faixa"], as_index=False).agg(tmi=("tmi", lambda x: (x.mean()*100000.0))).rename(columns={"tmi": "TMI_i_100k"})
+    st.dataframe(tmi_tbl, use_container_width=True)
+except Exception as e:
+    st.warning(f"Não foi possível calcular TMIᵢ com os filtros atuais. {e}")
+    tmi_tbl = None
+
+# ====== CMB para o período ======
+st.subheader("Coeficiente de Mortalidade Bruto (CMB) por 100.000 habitantes — período selecionado")
+try:
+    cmb = compute_cmb(ob_f, pr, anos_sel)
+    st.dataframe(cmb, use_container_width=True)
+except Exception as e:
+    st.warning(f"Não foi possível calcular CMB. {e}")
+    cmb = None
+
+# ====== Padronização direta ======
+st.subheader("Taxa padronizada por idade (método direto) — por 100.000 habitantes")
+try:
+    pad = compute_padronizado_direto(ob_f, pr_f, pb)
+    st.dataframe(pad, use_container_width=True)
+except Exception as e:
+    st.error(f"Erro ao calcular taxas padronizadas. {e}")
+    st.stop()
+
+# ====== Gráficos de tendência ======
+st.subheader("Tendência — taxas brutas vs padronizadas")
+with st.container():
+    colA, colB = st.columns(2)
+    with colA:
+        try:
+            plot_lines(pad, "taxa_bruta_100k", "Taxa bruta por 100.000 ao longo do tempo")
+        except Exception as e:
+            st.warning(f"Falha ao plotar taxa bruta. {e}")
+    with colB:
+        try:
+            plot_lines(pad, "taxa_padronizada_100k", "Taxa padronizada por 100.000 ao longo do tempo")
+        except Exception as e:
+            st.warning(f"Falha ao plotar taxa padronizada. {e}")
+
+# ====== Joinpoint (estimativa de pontos de mudança) ======
+st.subheader("Análise de tendência com Joinpoints (estimados)")
+for reg in regs_sel:
+    sr = pad[pad["regiao"] == reg].copy()
+    if len(sr) < 4:
+        st.info(f"{reg}: poucos pontos no tempo para estimar joinpoints.")
+        continue
+    joinpoint_analysis(sr, "taxa_padronizada_100k", max_breaks=max_breaks)
+
+st.caption("Observação: as estimativas dependem da qualidade e consistência dos dados por faixa etária. Se algum ano ou faixa estiver ausente, os cálculos serão feitos com os cruzamentos disponíveis.")
