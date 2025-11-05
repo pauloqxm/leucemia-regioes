@@ -428,8 +428,70 @@ elif pagina == "Padronização por Idade":
         
         st.dataframe(comparativo_df.round(2), use_container_width=True)
         
-        # Gráfico comparativo
-        st.subheader("📈 Evolução: CMB vs Taxa Padronizada")
+        # NOVO: Gráfico de comparação por faixa etária
+        st.subheader("📊 Comparação Detalhada por Faixa Etária")
+        
+        # Selecionar ano para análise detalhada
+        anos_disponiveis = sorted(tmi_df['Ano'].unique())
+        ano_detalhado = st.selectbox("Selecione o ano para análise detalhada por faixa etária:", anos_disponiveis)
+        
+        # Dados para o ano selecionado
+        tmi_ano_selecionado = tmi_df[tmi_df['Ano'] == ano_detalhado]
+        
+        if not tmi_ano_selecionado.empty:
+            # Ordem das faixas etárias
+            ordem_faixas = [
+                'Menor 1 ano', '1 a 4 anos', '5 a 9 anos', '10 a 14 anos', 
+                '15 a 19 anos', '20 a 29 anos', '30 a 39 anos', '40 a 49 anos',
+                '50 a 59 anos', '60 a 69 anos', '70 a 79 anos', '80 anos e mais'
+            ]
+            ordem_faixas_filtrada = [faixa for faixa in ordem_faixas if faixa in faixas_selecionadas]
+            
+            # Criar gráfico de comparação por faixa etária
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
+            
+            # Gráfico 1: TMI por faixa etária e região
+            for regiao in tmi_ano_selecionado['Região'].unique():
+                dados_regiao = tmi_ano_selecionado[tmi_ano_selecionado['Região'] == regiao]
+                dados_regiao = dados_regiao.set_index('Faixa_Etaria').reindex(ordem_faixas_filtrada).reset_index()
+                ax1.plot(dados_regiao['Faixa_Etaria'], dados_regiao['TMI'], 
+                        marker='o', label=regiao, linewidth=2, markersize=6)
+            
+            ax1.set_xlabel('Faixa Etária')
+            ax1.set_ylabel('TMI (óbitos por 100.000 habitantes)')
+            ax1.set_title(f'Taxa de Mortalidade por Idade - {ano_detalhado}')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            ax1.tick_params(axis='x', rotation=45)
+            
+            # Gráfico 2: Comparação entre regiões para cada faixa etária (gráfico de barras)
+            tmi_pivot = tmi_ano_selecionado.pivot_table(values='TMI', index='Faixa_Etaria', columns='Região').reindex(ordem_faixas_filtrada)
+            
+            x = np.arange(len(ordem_faixas_filtrada))
+            width = 0.35
+            regioes = tmi_pivot.columns
+            
+            for i, regiao in enumerate(regioes):
+                offset = width * i
+                ax2.bar(x + offset, tmi_pivot[regiao], width, label=regiao, alpha=0.8)
+            
+            ax2.set_xlabel('Faixa Etária')
+            ax2.set_ylabel('TMI (óbitos por 100.000 habitantes)')
+            ax2.set_title(f'Comparação Regional por Faixa Etária - {ano_detalhado}')
+            ax2.set_xticks(x + width / len(regioes))
+            ax2.set_xticklabels(ordem_faixas_filtrada, rotation=45)
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            # Tabela detalhada por faixa etária
+            st.subheader(f"📋 Tabela Detalhada - Taxas por Faixa Etária ({ano_detalhado})")
+            st.dataframe(tmi_pivot.round(2), use_container_width=True)
+        
+        # Gráfico comparativo CMB vs Padronizado (existente)
+        st.subheader("📈 Evolução Temporal: CMB vs Taxa Padronizada")
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
@@ -460,8 +522,66 @@ elif pagina == "Padronização por Idade":
         plt.tight_layout()
         st.pyplot(fig)
         
-        # Análise de diferenças
-        st.subheader("📊 Análise das Diferenças")
+        # NOVO: Gráfico de diferenças por faixa etária
+        st.subheader("📊 Impacto da Estrutura Etária nas Diferenças Regionais")
+        
+        if len(tmi_df['Ano'].unique()) > 0:
+            ano_impacto = st.selectbox("Selecione o ano para análise de impacto:", sorted(tmi_df['Ano'].unique()))
+            
+            tmi_ano_impacto = tmi_df[tmi_df['Ano'] == ano_impacto]
+            
+            if not tmi_ano_impacto.empty and len(tmi_ano_impacto['Região'].unique()) == 2:
+                # Calcular diferenças entre regiões por faixa etária
+                tmi_pivot_impacto = tmi_ano_impacto.pivot_table(values='TMI', index='Faixa_Etaria', columns='Região').reindex(ordem_faixas_filtrada)
+                
+                if 'Nordeste' in tmi_pivot_impacto.columns and 'Sudeste' in tmi_pivot_impacto.columns:
+                    tmi_pivot_impacto['Diferença'] = tmi_pivot_impacto['Sudeste'] - tmi_pivot_impacto['Nordeste']
+                    
+                    fig, ax = plt.subplots(figsize=(14, 7))
+                    
+                    # Gráfico de diferenças
+                    bars = ax.bar(tmi_pivot_impacto.index, tmi_pivot_impacto['Diferença'], 
+                                 color=['red' if x < 0 else 'green' for x in tmi_pivot_impacto['Diferença']],
+                                 alpha=0.7)
+                    
+                    ax.set_xlabel('Faixa Etária')
+                    ax.set_ylabel('Diferença (Sudeste - Nordeste)')
+                    ax.set_title(f'Diferença nas Taxas de Mortalidade entre Regiões por Faixa Etária - {ano_impacto}')
+                    ax.grid(True, alpha=0.3)
+                    ax.tick_params(axis='x', rotation=45)
+                    
+                    # Adicionar valores nas barras
+                    for bar in bars:
+                        height = bar.get_height()
+                        ax.text(bar.get_x() + bar.get_width()/2., height,
+                                f'{height:.1f}',
+                                ha='center', va='bottom' if height > 0 else 'top')
+                    
+                    # Linha zero de referência
+                    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+                    
+                    st.pyplot(fig)
+                    
+                    # Legenda interpretativa
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.info("""
+                        **📈 Interpretação das Diferenças:**
+                        - **🟩 Valores positivos**: Maior mortalidade no Sudeste
+                        - **🟥 Valores negativos**: Maior mortalidade no Nordeste
+                        - **📊 Padrões por idade**: Revelam diferenças regionais específicas
+                        """)
+                    
+                    with col2:
+                        st.info("""
+                        **🔍 Análise Epidemiológica:**
+                        - Diferenças podem indicar desigualdades em acesso à saúde
+                        - Padrões etários específicos sugerem fatores de risco distintos
+                        - Tendências consistentes merecem investigação mais aprofundada
+                        """)
+        
+        # Análise de diferenças (existente)
+        st.subheader("📊 Análise das Diferenças entre CMB e Taxa Padronizada")
         
         comparativo_df['Diferenca'] = comparativo_df['Taxa_Padronizada'] - comparativo_df['CMB']
         
@@ -473,17 +593,50 @@ elif pagina == "Padronização por Idade":
                 dados_ano = comparativo_df[comparativo_df['Ano'] == ano]
                 st.write(f"**{ano}:**")
                 for _, row in dados_ano.iterrows():
-                    st.write(f"{row['Região']}: {row['Diferenca']:.3f}")
+                    cor = "🟢" if row['Diferenca'] > 0 else "🔴" if row['Diferenca'] < 0 else "⚪"
+                    st.write(f"{cor} {row['Região']}: {row['Diferenca']:.3f}")
         
         with col2:
             st.write("**🔍 Interpretação:**")
             st.write("""
-            - **📈 Diferença positiva:** Estrutura etária mais jovem na região
-            - **📉 Diferença negativa:** Estrutura etária mais envelhecida na região  
-            - **⚖️ Valores próximos de zero:** Estrutura etária similar à padrão
+            - **📈 Diferença positiva**: Estrutura etária mais jovem na região
+            - **📉 Diferença negativa**: Estrutura etária mais envelhecida na região  
+            - **⚖️ Valores próximos de zero**: Estrutura etária similar à padrão
             
-            *A padronização remove o efeito da estrutura etária, permitindo comparações mais válidas entre regiões.*
+            **💡 Importância:**
+            A padronização remove o efeito da estrutura etária, permitindo comparações mais válidas entre regiões com diferentes pirâmides populacionais.
             """)
+        
+        # NOVO: Resumo estatístico por faixa etária
+        st.subheader("📈 Resumo Estatístico por Faixa Etária")
+        
+        if len(tmi_df['Ano'].unique()) > 0:
+            # Calcular médias por faixa etária
+            media_faixa = tmi_df.groupby(['Faixa_Etaria', 'Região'])['TMI'].mean().unstack().reindex(ordem_faixas_filtrada)
+            
+            fig, ax = plt.subplots(figsize=(14, 7))
+            
+            x = np.arange(len(ordem_faixas_filtrada))
+            width = 0.35
+            
+            for i, regiao in enumerate(media_faixa.columns):
+                offset = width * i
+                ax.bar(x + offset, media_faixa[regiao], width, label=regiao, alpha=0.8)
+            
+            ax.set_xlabel('Faixa Etária')
+            ax.set_ylabel('TMI Média (óbitos por 100.000 habitantes)')
+            ax.set_title('Média das Taxas de Mortalidade por Faixa Etária (Período Selecionado)')
+            ax.set_xticks(x + width / len(media_faixa.columns))
+            ax.set_xticklabels(ordem_faixas_filtrada, rotation=45)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            # Tabela de médias
+            st.dataframe(media_faixa.round(2), use_container_width=True)
+            
     else:
         st.warning("⚠️ Não há dados disponíveis para os filtros selecionados.")
 
