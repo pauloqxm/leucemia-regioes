@@ -17,7 +17,16 @@ FILE_POP_BR = DATA_DIR / "Pop_BR.csv"
 
 # ========= HELPERS =========
 def norm(s: str) -> str:
-    return unidecode(s).strip().lower().replace("  ", " ").replace("-", " ").replace(".", "").replace("/", " ").replace("\", " ")
+    return (
+        unidecode(s)
+        .strip()
+        .lower()
+        .replace("  ", " ")
+        .replace("-", " ")
+        .replace(".", "")
+        .replace("/", " ")
+        .replace("\\", " ")
+    )
 
 COLMAP = {
     "regiao": {"regiao", "região", "uf", "macroregiao", "macrorregiao", "region"},
@@ -30,16 +39,15 @@ COLMAP = {
 
 def auto_map_columns(df: pd.DataFrame, required: List[str]) -> Dict[str, str]:
     """Tenta mapear nomes de colunas do df para chaves lógicas em 'required'."""
-    candidates = {k: {norm(x) for x in v} for k, v in COLMAP.items()}
+    candidates = {k: {norm(x) for x in COLMAP.get(k, set())} for k in COLMAP}
     normalized_cols = {norm(c): c for c in df.columns}
     mapping = {}
     for need in required:
         found = None
         for col_norm, original in normalized_cols.items():
-            if need in candidates:
-                if (col_norm in candidates[need]) or (need == col_norm):
-                    found = original
-                    break
+            if need in candidates and ((col_norm in candidates[need]) or (need == col_norm)):
+                found = original
+                break
         # fallback por similaridade simples
         if not found:
             for col_norm, original in normalized_cols.items():
@@ -101,7 +109,12 @@ def load_data():
     # padroniza categorias de faixa etária (remove espaços duplicados)
     for df in [ob, pr, pb]:
         if "faixa" in df.columns:
-            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True)
+            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True)  # será corrigido logo abaixo
+
+    # Correção: usar regex de whitespace corretamente
+    for df in [ob, pr, pb]:
+        if "faixa" in df.columns:
+            df["faixa"] = df["faixa"].str.replace(r"\s+", " ", regex=True).str.replace(r"\s+", " ", regex=True)
 
     # Se Pop_BR tiver anos, agrega por faixa
     if "ano" in pb.columns:
